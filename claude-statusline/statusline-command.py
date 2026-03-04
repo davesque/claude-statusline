@@ -494,49 +494,33 @@ def main() -> None:
     usage_5h_pct: float | None = None
     usage_5h_suffix = Text()
     usage_5h_target: float | None = None
-    usage_5h_ttl: str | None = None
     if usage and "five_hour" in usage:
         fh = usage["five_hour"]
         usage_5h_pct = fh.get("utilization", 0)
         resets_5h = fh.get("resets_at", "")
         usage_5h_target = pacing_target(resets_5h, 5 * 3600, now)
         usage_5h_ttl = time_until_reset(resets_5h, now)
-        usage_5h_suffix = Text.assemble(
-            (f"{int(round(usage_5h_pct))}%", pct_style(usage_5h_pct)),
-        )
+        usage_5h_suffix = Text()
+        usage_5h_suffix.append(f"{int(round(usage_5h_pct))}%", style=pct_style(usage_5h_pct))
+        if usage_5h_ttl:
+            usage_5h_suffix.append(" ⟳", style=DIM)
+            usage_5h_suffix.append(usage_5h_ttl)
 
     # 7d usage
     usage_7d_pct: float | None = None
     usage_7d_suffix = Text()
     usage_7d_target: float | None = None
-    usage_7d_ttl: str | None = None
     if usage and "seven_day" in usage:
         sd = usage["seven_day"]
         usage_7d_pct = sd.get("utilization", 0)
         resets_7d = sd.get("resets_at", "")
         usage_7d_target = pacing_target(resets_7d, 7 * 24 * 3600, now)
         usage_7d_ttl = time_until_reset(resets_7d, now)
-        usage_7d_suffix = Text.assemble(
-            (f"{int(round(usage_7d_pct))}%", pct_style(usage_7d_pct)),
-        )
-
-    # --- Right cell content (⟳ reset timers) ---
-    ctx_right = Text()
-    usage_5h_right = Text()
-    usage_7d_right = Text()
-    if usage_5h_ttl:
-        usage_5h_right.append("⟳", style=DIM)
-        usage_5h_right.append(usage_5h_ttl)
-    if usage_7d_ttl:
-        usage_7d_right.append("⟳", style=DIM)
-        usage_7d_right.append(usage_7d_ttl)
-
-    right_cell_width = max(
-        ctx_right.cell_len, usage_5h_right.cell_len, usage_7d_right.cell_len
-    )
-    has_right_cell = right_cell_width > 0
-    right_sep = Text(" │ ", style=DIM_GRAY)
-    right_overhead = (right_sep.cell_len + right_cell_width) if has_right_cell else 0
+        usage_7d_suffix = Text()
+        usage_7d_suffix.append(f"{int(round(usage_7d_pct))}%", style=pct_style(usage_7d_pct))
+        if usage_7d_ttl:
+            usage_7d_suffix.append(" ⟳", style=DIM)
+            usage_7d_suffix.append(usage_7d_ttl)
 
     suffix_width = max(
         ctx_suffix.cell_len, usage_5h_suffix.cell_len, usage_7d_suffix.cell_len
@@ -544,11 +528,9 @@ def main() -> None:
     min_bar_width = 30
     bar_width = max(
         min_bar_width,
-        content_width - label_width - 1 - 1 - suffix_width - right_overhead,
+        content_width - label_width - 1 - 1 - suffix_width,
     )
-    min_bar_content = (
-        label_width + 1 + min_bar_width + 1 + suffix_width + right_overhead
-    )
+    min_bar_content = label_width + 1 + min_bar_width + 1 + suffix_width
     content_width = max(content_width, min_bar_content)
 
     # Justify metrics rows: distribute extra space evenly to both cells
@@ -562,7 +544,6 @@ def main() -> None:
         label: str,
         pct: float | None,
         suffix: Text,
-        right_content: Text,
         target_pct: float | None = None,
         green: int = 50,
         yellow: int = 80,
@@ -581,17 +562,14 @@ def main() -> None:
         pad = suffix_width - suffix.cell_len
         if pad > 0:
             row.append(" " * pad)
-        if has_right_cell:
-            row.append_text(right_sep)
-            row.append_text(center_text(right_content, right_cell_width))
         return row
 
-    ctx_row = make_bar_row("ctx", ctx_pct, ctx_suffix, ctx_right, green=60, yellow=85)
+    ctx_row = make_bar_row("ctx", ctx_pct, ctx_suffix, green=60, yellow=85)
     usage_5h_row = make_bar_row(
-        "5h", usage_5h_pct, usage_5h_suffix, usage_5h_right, usage_5h_target
+        "5h", usage_5h_pct, usage_5h_suffix, usage_5h_target
     )
     usage_7d_row = make_bar_row(
-        "7d", usage_7d_pct, usage_7d_suffix, usage_7d_right, usage_7d_target
+        "7d", usage_7d_pct, usage_7d_suffix, usage_7d_target
     )
 
     # --- Render table ---
