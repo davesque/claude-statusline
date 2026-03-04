@@ -1,0 +1,22 @@
+[project]
+name = "claude-statusline"
+version = "0.4.0"
+requires-python = ">=3.10"
+dependencies = ["rich"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-mock>=3.14", "ruff>=0.8", "ty"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"claude-statusline/statusline-command.py" = ["SIM105", "E741", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-v", "--tb=short"]

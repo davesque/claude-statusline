@@ -1,0 +1,11 @@
+{
+  "name": "claude-statusline-marketplace",
+  "owner": { "name": "david-sanders" },
+  "plugins": [
+    {
+      "name": "claude-statusline",
+      "source": "./claude-statusline",
+      "description": "Status line with context, cost, and usage tracking for Claude Code"
+    }
+  ]
+}
