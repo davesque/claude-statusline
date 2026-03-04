@@ -107,6 +107,9 @@ def format_time_delta(seconds: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+FRACTIONAL_BLOCKS = " ▏▎▍▌▋▊▉█"  # index 0=empty, 8=full
+
+
 def build_bar(
     pct: float,
     width: int = 20,
@@ -114,8 +117,10 @@ def build_bar(
     green: int = 50,
     yellow: int = 80,
 ) -> Text:
-    """Build a colored progress bar as a Rich Text object."""
-    filled = min(int(round(pct)) * width // 100, width)
+    """Build a colored progress bar with sub-character fill precision."""
+    fill = min(pct, 100.0) * width / 100.0
+    full = int(fill)
+    frac = fill - full
     style = pct_style(pct, green, yellow)
 
     target_pos = -1
@@ -127,8 +132,14 @@ def build_bar(
     for i in range(width):
         if i == target_pos:
             bar.append("│", style=HOT_PINK)
-        elif i < filled:
+        elif i < full:
             bar.append("█", style=style)
+        elif i == full and full < width:
+            eighth = int(round(frac * 8))
+            if eighth == 0:
+                bar.append("░", style=DIM_GRAY)
+            else:
+                bar.append(FRACTIONAL_BLOCKS[eighth], style=style)
         else:
             bar.append("░", style=DIM_GRAY)
     return bar
