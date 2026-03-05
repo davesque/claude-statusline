@@ -94,15 +94,13 @@ class TestFetchUsage:
 class TestGetUsage:
     """get_usage: caching and locking logic."""
 
-    def _set_cache_paths(self, mod, monkeypatch, tmp_path):
+    def _set_cache_path(self, mod, monkeypatch, tmp_path):
         cache = tmp_path / "usage-cache.json"
-        lock = tmp_path / "usage-cache.lock"
         monkeypatch.setattr(mod, "USAGE_CACHE", cache)
-        monkeypatch.setattr(mod, "USAGE_LOCK", lock)
         return cache
 
     def test_fresh_cache_hit(self, mod, tmp_path, monkeypatch):
-        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
         usage_data = {
             "five_hour": {"utilization": 30},
             "seven_day": {"utilization": 50},
@@ -114,7 +112,7 @@ class TestGetUsage:
         assert result == usage_data
 
     def test_stale_cache_fallback(self, mod, tmp_path, monkeypatch, mock_home):
-        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
         old_data = {"five_hour": {"utilization": 20}, "seven_day": {"utilization": 40}}
         cache.write_text(json.dumps(old_data))
 
@@ -126,7 +124,7 @@ class TestGetUsage:
 
     def test_no_cache_first_run(self, mod, tmp_path, monkeypatch, mock_home):
         """First run: no cache file. Creates placeholder, fetches, returns None on failure."""
-        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
         assert not cache.exists()
 
         with patch.object(mod, "get_oauth_token", return_value=None):
@@ -136,7 +134,7 @@ class TestGetUsage:
 
     def test_first_run_fetch_succeeds(self, mod, tmp_path, monkeypatch, mock_home):
         """First run: no cache file. Fetches and returns data."""
-        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
         new_data = {
             "five_hour": {"utilization": 50, "resets_at": "2025-01-15T05:00:00+00:00"},
             "seven_day": {"utilization": 70, "resets_at": "2025-01-20T00:00:00+00:00"},
@@ -155,7 +153,7 @@ class TestGetUsage:
 
     def test_fresh_placeholder_no_fetch(self, mod, tmp_path, monkeypatch):
         """Fresh placeholder (empty file) returns None without fetching."""
-        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
         cache.touch()  # empty placeholder
 
         with patch.object(mod, "fetch_usage") as mock_fetch:
@@ -164,86 +162,9 @@ class TestGetUsage:
         assert result is None
         mock_fetch.assert_not_called()
 
-    def test_first_run_lock_contention(self, mod, tmp_path, monkeypatch):
-        """First run, another process holds lock: return None (placeholder only)."""
-        import fcntl
-
-        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
-        lock_path = tmp_path / "usage-cache.lock"
-        assert not cache.exists()
-
-        lock_fd = lock_path.open("w")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
-            result = mod.get_usage(1000000.0)
-            assert result is None
-            assert cache.exists()  # placeholder was created
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            lock_fd.close()
-
-    def test_lock_contention_placeholder_returns_none(self, mod, tmp_path, monkeypatch):
-        """Lock contention with stale placeholder (no valid data) returns None."""
-        import fcntl
-
-        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
-        lock_path = tmp_path / "usage-cache.lock"
-        cache.touch()  # empty placeholder
-
-        lock_fd = lock_path.open("w")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
-            now = cache.stat().st_mtime + 120  # stale
-            result = mod.get_usage(now)
-            assert result is None
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            lock_fd.close()
-
-    def test_lock_contention_returns_stale(self, mod, tmp_path, monkeypatch):
-        """When another process holds the lock, return stale cache."""
-        import fcntl
-
-        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
-        lock_path = tmp_path / "usage-cache.lock"
-        old_data = {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 20}}
-        cache.write_text(json.dumps(old_data))
-
-        # Hold the lock from "another process"
-        lock_fd = lock_path.open("w")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
-            now = cache.stat().st_mtime + 120  # stale
-            result = mod.get_usage(now)
-            assert result == old_data
-        finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            lock_fd.close()
-
-    def test_lock_acquired_cache_now_fresh(self, mod, tmp_path, monkeypatch):
-        """After acquiring lock, cache was refreshed by another process."""
-        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
-        data = {"five_hour": {"utilization": 30}, "seven_day": {"utilization": 50}}
-        cache.write_text(json.dumps(data))
-
-        call_count = 0
-        original_cache_is_fresh = mod._cache_is_fresh
-
-        def _patched_fresh(now):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return False  # first check: stale
-            return True  # second check (after lock): fresh
-
-        with patch.object(mod, "_cache_is_fresh", side_effect=_patched_fresh):
-            result = mod.get_usage(0.0)
-        assert result == data
-        assert call_count == 2
-
-    def test_lock_acquired_refreshes_cache(self, mod, tmp_path, monkeypatch, mock_home):
+    def test_stale_cache_refreshes(self, mod, tmp_path, monkeypatch, mock_home):
         """When lock is acquired and cache is stale, fetch new data."""
-        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
         old_data = {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 20}}
         cache.write_text(json.dumps(old_data))
 

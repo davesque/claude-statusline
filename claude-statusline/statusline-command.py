@@ -14,7 +14,6 @@ Bar 3: 7d usage bar (pacing marker, ⟳reset)
 Usage data from Anthropic OAuth API.
 """
 
-import fcntl
 import json
 import subprocess
 import sys
@@ -328,7 +327,6 @@ def update_velocity(
 # ---------------------------------------------------------------------------
 
 USAGE_CACHE = Path.home() / ".claude" / "statusline-usage.json"
-USAGE_LOCK = USAGE_CACHE.with_suffix(".lock")
 USAGE_CACHE_AGE = 60  # seconds
 
 
@@ -408,8 +406,14 @@ def get_usage(now: float) -> dict | None:
     """Return cached usage data, refreshing if stale.
 
     On first run (no cache file), creates a placeholder and fetches
-    immediately.  Concurrent instances see the placeholder's fresh mtime
-    and back off.  Uses a lock file so only one process fetches at a time.
+    immediately.  The placeholder's fresh mtime prevents concurrent
+    instances from also fetching.
+
+    Note: file locking (fcntl.flock) was considered but not implemented.
+    Without it, multiple concurrent instances may all see a stale cache
+    and each refresh independently.  This is acceptable since every
+    failure path touches the cache mtime, bounding retries to once per
+    TTL per instance regardless of outcome.
     """
     first_run = not USAGE_CACHE.exists()
     if first_run:
@@ -418,20 +422,7 @@ def get_usage(now: float) -> dict | None:
     if not first_run and _cache_is_fresh(now):
         return _read_cache()
 
-    try:
-        lock_fd = USAGE_LOCK.open("w")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError):
-        return _read_cache()
-
-    try:
-        # Re-check after acquiring lock — another process may have refreshed
-        if not first_run and _cache_is_fresh(now):
-            return _read_cache()
-        return fetch_usage() or _read_cache()
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
+    return fetch_usage() or _read_cache()
 
 
 def _reset_epoch(resets_at: str) -> float | None:
