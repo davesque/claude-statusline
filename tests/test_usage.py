@@ -82,28 +82,31 @@ class TestFetchUsage:
 
 
 class TestGetUsage:
-    """get_usage: caching logic."""
+    """get_usage: caching and locking logic."""
+
+    def _set_cache_paths(self, mod, monkeypatch, tmp_path):
+        cache = tmp_path / "usage-cache.json"
+        lock = tmp_path / "usage-cache.lock"
+        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
+        monkeypatch.setattr(mod, "USAGE_LOCK", lock)
+        return cache
 
     def test_fresh_cache_hit(self, mod, tmp_path, monkeypatch):
-        cache = tmp_path / "usage-cache.json"
+        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
         usage_data = {
             "five_hour": {"utilization": 30},
             "seven_day": {"utilization": 50},
         }
         cache.write_text(json.dumps(usage_data))
 
-        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
-
         now = cache.stat().st_mtime + 10  # 10s old, within 60s
         result = mod.get_usage(now)
         assert result == usage_data
 
     def test_stale_cache_fallback(self, mod, tmp_path, monkeypatch, mock_home):
-        cache = tmp_path / "usage-cache.json"
+        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
         old_data = {"five_hour": {"utilization": 20}, "seven_day": {"utilization": 40}}
         cache.write_text(json.dumps(old_data))
-
-        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
 
         # No auth → fetch returns None → falls back to stale cache
         with patch.object(mod, "get_oauth_token", return_value=None):
@@ -112,12 +115,77 @@ class TestGetUsage:
         assert result == old_data
 
     def test_no_cache(self, mod, tmp_path, monkeypatch, mock_home):
-        cache = tmp_path / "nonexistent-cache.json"
-        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
+        self._set_cache_paths(mod, monkeypatch, tmp_path)
 
         with patch.object(mod, "get_oauth_token", return_value=None):
             result = mod.get_usage(1000000.0)
         assert result is None
+
+    def test_lock_contention_returns_stale(self, mod, tmp_path, monkeypatch):
+        """When another process holds the lock, return stale cache."""
+        import fcntl
+
+        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        lock_path = tmp_path / "usage-cache.lock"
+        old_data = {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 20}}
+        cache.write_text(json.dumps(old_data))
+
+        # Hold the lock from "another process"
+        lock_fd = lock_path.open("w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            now = cache.stat().st_mtime + 120  # stale
+            result = mod.get_usage(now)
+            assert result == old_data
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+
+    def test_lock_acquired_cache_now_fresh(self, mod, tmp_path, monkeypatch):
+        """After acquiring lock, cache was refreshed by another process."""
+        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        data = {"five_hour": {"utilization": 30}, "seven_day": {"utilization": 50}}
+        cache.write_text(json.dumps(data))
+
+        call_count = 0
+        original_read_cache = mod._read_cache
+
+        def _patched_read_cache(now):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call: report stale
+                return data, False
+            # Second call (after lock): report fresh
+            return data, True
+
+        with patch.object(mod, "_read_cache", side_effect=_patched_read_cache):
+            result = mod.get_usage(0.0)
+        assert result == data
+        assert call_count == 2
+
+    def test_lock_acquired_refreshes_cache(self, mod, tmp_path, monkeypatch, mock_home):
+        """When lock is acquired and cache is stale, fetch new data."""
+        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        old_data = {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 20}}
+        cache.write_text(json.dumps(old_data))
+
+        new_data = {
+            "five_hour": {"utilization": 50, "resets_at": "2025-01-15T05:00:00+00:00"},
+            "seven_day": {"utilization": 70, "resets_at": "2025-01-20T00:00:00+00:00"},
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(new_data).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch.object(mod, "get_oauth_token", return_value="tok-abc"),
+            patch("urllib.request.urlopen", return_value=mock_resp),
+        ):
+            now = cache.stat().st_mtime + 120  # stale
+            result = mod.get_usage(now)
+        assert result == new_data
 
 
 class TestResetEpoch:

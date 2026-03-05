@@ -14,6 +14,7 @@ Bar 3: 7d usage bar (pacing marker, ⟳reset)
 Usage data from Anthropic OAuth API.
 """
 
+import fcntl
 import json
 import subprocess
 import sys
@@ -326,7 +327,8 @@ def update_velocity(
 # Usage quota (Anthropic OAuth API)
 # ---------------------------------------------------------------------------
 
-USAGE_CACHE = Path("/tmp/claude-statusline-usage.json")
+USAGE_CACHE = Path.home() / ".claude" / "statusline-usage.json"
+USAGE_LOCK = USAGE_CACHE.with_suffix(".lock")
 USAGE_CACHE_AGE = 60  # seconds
 
 
@@ -372,19 +374,43 @@ def fetch_usage() -> dict | None:
     return data
 
 
-def get_usage(now: float) -> dict | None:
-    """Return cached usage data, refreshing if stale."""
-    cached = None
+def _read_cache(now: float) -> tuple[dict | None, bool]:
+    """Read cache file. Return (data, is_fresh)."""
     try:
         if USAGE_CACHE.exists():
-            cached = json.loads(USAGE_CACHE.read_text())
+            data = json.loads(USAGE_CACHE.read_text())
             age = now - USAGE_CACHE.stat().st_mtime
-            if age <= USAGE_CACHE_AGE:
-                return cached
+            return data, age <= USAGE_CACHE_AGE
     except (json.JSONDecodeError, OSError):  # pragma: no cover
         pass
+    return None, False
 
-    return fetch_usage() or cached
+
+def get_usage(now: float) -> dict | None:
+    """Return cached usage data, refreshing if stale.
+
+    Uses a lock file so only one process fetches at a time.
+    Other processes fall back to the (possibly stale) cache.
+    """
+    cached, fresh = _read_cache(now)
+    if fresh:
+        return cached
+
+    try:
+        lock_fd = USAGE_LOCK.open("w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        return cached
+
+    try:
+        # Re-check after acquiring lock — another process may have refreshed
+        cached, fresh = _read_cache(now)
+        if fresh:
+            return cached
+        return fetch_usage() or cached
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 def _reset_epoch(resets_at: str) -> float | None:
