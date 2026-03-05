@@ -9,3 +9,4 @@ build/
 docs/
 .claude/
 screenshot.png
+.coverage
