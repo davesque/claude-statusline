@@ -55,19 +55,28 @@ class TestFetchUsage:
         assert result == usage_data
         assert cache.exists()
 
-    def test_no_auth_token(self, mod, mock_home):
+    def test_no_auth_token(self, mod, mock_home, tmp_path, monkeypatch):
+        cache = tmp_path / "usage-cache.json"
+        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
+
         with patch.object(mod, "get_oauth_token", return_value=None):
             assert mod.fetch_usage() is None
+        assert cache.exists()  # touched to prevent immediate retry
 
-    def test_network_error(self, mod, mock_home, monkeypatch):
+    def test_network_error(self, mod, mock_home, tmp_path, monkeypatch):
+        cache = tmp_path / "usage-cache.json"
+        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
+
         with (
             patch.object(mod, "get_oauth_token", return_value="tok-abc"),
             patch("urllib.request.urlopen", side_effect=Exception("timeout")),
         ):
             assert mod.fetch_usage() is None
+        assert cache.exists()  # touched to prevent immediate retry
 
     def test_missing_usage_keys(self, mod, mock_home, tmp_path, monkeypatch):
-        monkeypatch.setattr(mod, "USAGE_CACHE", tmp_path / "usage-cache.json")
+        cache = tmp_path / "usage-cache.json"
+        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
 
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"other": "data"}).encode()
@@ -79,6 +88,7 @@ class TestFetchUsage:
             patch("urllib.request.urlopen", return_value=mock_resp),
         ):
             assert mod.fetch_usage() is None
+        assert cache.exists()  # touched to prevent immediate retry
 
 
 class TestGetUsage:
@@ -114,12 +124,81 @@ class TestGetUsage:
             result = mod.get_usage(now)
         assert result == old_data
 
-    def test_no_cache(self, mod, tmp_path, monkeypatch, mock_home):
-        self._set_cache_paths(mod, monkeypatch, tmp_path)
+    def test_no_cache_first_run(self, mod, tmp_path, monkeypatch, mock_home):
+        """First run: no cache file. Creates placeholder, fetches, returns None on failure."""
+        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        assert not cache.exists()
 
         with patch.object(mod, "get_oauth_token", return_value=None):
             result = mod.get_usage(1000000.0)
         assert result is None
+        assert cache.exists()  # placeholder created
+
+    def test_first_run_fetch_succeeds(self, mod, tmp_path, monkeypatch, mock_home):
+        """First run: no cache file. Fetches and returns data."""
+        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        new_data = {
+            "five_hour": {"utilization": 50, "resets_at": "2025-01-15T05:00:00+00:00"},
+            "seven_day": {"utilization": 70, "resets_at": "2025-01-20T00:00:00+00:00"},
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(new_data).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch.object(mod, "get_oauth_token", return_value="tok-abc"),
+            patch("urllib.request.urlopen", return_value=mock_resp),
+        ):
+            result = mod.get_usage(1000000.0)
+        assert result == new_data
+
+    def test_fresh_placeholder_no_fetch(self, mod, tmp_path, monkeypatch):
+        """Fresh placeholder (empty file) returns None without fetching."""
+        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        cache.touch()  # empty placeholder
+
+        with patch.object(mod, "fetch_usage") as mock_fetch:
+            now = cache.stat().st_mtime + 10  # fresh
+            result = mod.get_usage(now)
+        assert result is None
+        mock_fetch.assert_not_called()
+
+    def test_first_run_lock_contention(self, mod, tmp_path, monkeypatch):
+        """First run, another process holds lock: return None (placeholder only)."""
+        import fcntl
+
+        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        lock_path = tmp_path / "usage-cache.lock"
+        assert not cache.exists()
+
+        lock_fd = lock_path.open("w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            result = mod.get_usage(1000000.0)
+            assert result is None
+            assert cache.exists()  # placeholder was created
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+
+    def test_lock_contention_placeholder_returns_none(self, mod, tmp_path, monkeypatch):
+        """Lock contention with stale placeholder (no valid data) returns None."""
+        import fcntl
+
+        cache = self._set_cache_paths(mod, monkeypatch, tmp_path)
+        lock_path = tmp_path / "usage-cache.lock"
+        cache.touch()  # empty placeholder
+
+        lock_fd = lock_path.open("w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            now = cache.stat().st_mtime + 120  # stale
+            result = mod.get_usage(now)
+            assert result is None
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
 
     def test_lock_contention_returns_stale(self, mod, tmp_path, monkeypatch):
         """When another process holds the lock, return stale cache."""
@@ -148,18 +227,16 @@ class TestGetUsage:
         cache.write_text(json.dumps(data))
 
         call_count = 0
-        original_read_cache = mod._read_cache
+        original_cache_is_fresh = mod._cache_is_fresh
 
-        def _patched_read_cache(now):
+        def _patched_fresh(now):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                # First call: report stale
-                return data, False
-            # Second call (after lock): report fresh
-            return data, True
+                return False  # first check: stale
+            return True  # second check (after lock): fresh
 
-        with patch.object(mod, "_read_cache", side_effect=_patched_read_cache):
+        with patch.object(mod, "_cache_is_fresh", side_effect=_patched_fresh):
             result = mod.get_usage(0.0)
         assert result == data
         assert call_count == 2

@@ -342,10 +342,19 @@ def get_oauth_token() -> str | None:
         return None
 
 
+def _touch_cache() -> None:
+    """Update cache mtime to prevent immediate retry after a failed fetch."""
+    try:
+        USAGE_CACHE.touch(exist_ok=True)
+    except OSError:  # pragma: no cover
+        pass
+
+
 def fetch_usage() -> dict | None:
     """Fetch usage from Anthropic API and cache it."""
     token = get_oauth_token()
     if not token:
+        _touch_cache()
         return None
 
     try:
@@ -359,9 +368,11 @@ def fetch_usage() -> dict | None:
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read())
     except Exception:
+        _touch_cache()
         return None
 
     if "five_hour" not in data or "seven_day" not in data:
+        _touch_cache()
         return None
 
     try:
@@ -374,40 +385,50 @@ def fetch_usage() -> dict | None:
     return data
 
 
-def _read_cache(now: float) -> tuple[dict | None, bool]:
-    """Read cache file. Return (data, is_fresh)."""
+def _read_cache() -> dict | None:
+    """Read and parse the cache file. Returns None for missing/invalid data."""
     try:
-        if USAGE_CACHE.exists():
-            data = json.loads(USAGE_CACHE.read_text())
-            age = now - USAGE_CACHE.stat().st_mtime
-            return data, age <= USAGE_CACHE_AGE
-    except (json.JSONDecodeError, OSError):  # pragma: no cover
+        data = json.loads(USAGE_CACHE.read_text())
+        if "five_hour" in data and "seven_day" in data:
+            return data
+    except (json.JSONDecodeError, FileNotFoundError, OSError):
         pass
-    return None, False
+    return None
+
+
+def _cache_is_fresh(now: float) -> bool:
+    """Check if the cache file exists with an mtime within the TTL."""
+    try:
+        return (now - USAGE_CACHE.stat().st_mtime) <= USAGE_CACHE_AGE
+    except OSError:  # pragma: no cover
+        return False
 
 
 def get_usage(now: float) -> dict | None:
     """Return cached usage data, refreshing if stale.
 
-    Uses a lock file so only one process fetches at a time.
-    Other processes fall back to the (possibly stale) cache.
+    On first run (no cache file), creates a placeholder and fetches
+    immediately.  Concurrent instances see the placeholder's fresh mtime
+    and back off.  Uses a lock file so only one process fetches at a time.
     """
-    cached, fresh = _read_cache(now)
-    if fresh:
-        return cached
+    first_run = not USAGE_CACHE.exists()
+    if first_run:
+        _touch_cache()
+
+    if not first_run and _cache_is_fresh(now):
+        return _read_cache()
 
     try:
         lock_fd = USAGE_LOCK.open("w")
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (BlockingIOError, OSError):
-        return cached
+        return _read_cache()
 
     try:
         # Re-check after acquiring lock — another process may have refreshed
-        cached, fresh = _read_cache(now)
-        if fresh:
-            return cached
-        return fetch_usage() or cached
+        if not first_run and _cache_is_fresh(now):
+            return _read_cache()
+        return fetch_usage() or _read_cache()
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
