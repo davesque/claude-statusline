@@ -135,3 +135,183 @@ class TestMainEndToEnd:
         data["workspace"] = {}
         output = _run_main(mod, data, monkeypatch, mock_home, tmp_path)
         assert "Opus 4.6" in output
+
+    def test_emoji_labels_in_output(self, mod, monkeypatch, mock_home, tmp_path):
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        assert "🔮" in output  # model
+        assert "📂" in output  # cwd
+        assert "⏱️" in output  # duration
+        assert "💰" in output  # total cost
+        assert "👈" in output  # last turn
+        assert "⚖️" in output  # avg per turn
+
+    def test_burn_rate_in_output(self, mod, monkeypatch, mock_home, tmp_path):
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        assert "🔥" in output  # burn rate
+        assert "/hr" in output
+
+    def test_divider_in_output(self, mod, monkeypatch, mock_home, tmp_path):
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        assert "──" in output  # horizontal divider
+
+    def test_no_border_in_output(self, mod, monkeypatch, mock_home, tmp_path):
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        assert "┌" not in output
+        assert "┐" not in output
+        assert "└" not in output
+        assert "┘" not in output
+
+    def test_git_branch_in_output(self, mod, monkeypatch, mock_home, tmp_path):
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        # /tmp won't be a git repo, so no git figure expected
+        assert "🌿" not in output
+
+    def test_git_branch_with_repo(self, mod, monkeypatch, mock_home, tmp_path):
+        import subprocess
+
+        # Create a git repo in tmp_path
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "init"],
+            capture_output=True,
+            cwd=str(repo),
+        )
+
+        data = {**SAMPLE_INPUT, "workspace": {"current_dir": str(repo)}}
+        output = _run_main(mod, data, monkeypatch, mock_home, tmp_path)
+        assert "🌿" in output
+        assert "✓" in output  # clean repo
+
+    def test_usage_reset_timers(self, mod, monkeypatch, mock_home, tmp_path):
+        cache = tmp_path / "usage-cache.json"
+        usage = {
+            "five_hour": {
+                "utilization": 30,
+                "resets_at": "2099-01-15T05:00:00+00:00",
+            },
+            "seven_day": {
+                "utilization": 55,
+                "resets_at": "2099-01-20T00:00:00+00:00",
+            },
+        }
+        cache.write_text(json.dumps(usage))
+        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
+
+        import time
+
+        monkeypatch.setattr(time, "time", lambda: cache.stat().st_mtime + 5)
+
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        assert "⟳" in output  # reset timer indicator
+
+
+class TestLoadConfig:
+    """Tests for load_config()."""
+
+    def test_defaults_when_no_file(self, mod, tmp_path, monkeypatch):
+        monkeypatch.setattr(mod, "CONFIG_PATH", tmp_path / "nonexistent.json")
+        config = mod.load_config()
+        assert config["figures"] == mod.DEFAULT_FIGURES
+        assert config["min_bar_width"] == 30
+        assert config["max_width"] is None
+
+    def test_partial_config_merges_with_defaults(self, mod, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "statusline.json"
+        cfg_file.write_text(json.dumps({"min_bar_width": 50}))
+        monkeypatch.setattr(mod, "CONFIG_PATH", cfg_file)
+        config = mod.load_config()
+        assert config["figures"] == mod.DEFAULT_FIGURES
+        assert config["min_bar_width"] == 50
+        assert config["max_width"] is None
+
+    def test_custom_figures_order(self, mod, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "statusline.json"
+        cfg_file.write_text(json.dumps({"figures": ["duration", "model"]}))
+        monkeypatch.setattr(mod, "CONFIG_PATH", cfg_file)
+        config = mod.load_config()
+        assert config["figures"] == ["duration", "model"]
+
+    def test_min_bar_width_floor(self, mod, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "statusline.json"
+        cfg_file.write_text(json.dumps({"min_bar_width": 3}))
+        monkeypatch.setattr(mod, "CONFIG_PATH", cfg_file)
+        config = mod.load_config()
+        assert config["min_bar_width"] == 10  # clamped to minimum
+
+    def test_max_width_override(self, mod, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "statusline.json"
+        cfg_file.write_text(json.dumps({"max_width": 120}))
+        monkeypatch.setattr(mod, "CONFIG_PATH", cfg_file)
+        config = mod.load_config()
+        assert config["max_width"] == 120
+
+    def test_corrupt_json_returns_defaults(self, mod, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "statusline.json"
+        cfg_file.write_text("not json{{{")
+        monkeypatch.setattr(mod, "CONFIG_PATH", cfg_file)
+        config = mod.load_config()
+        assert config["figures"] == mod.DEFAULT_FIGURES
+
+    def test_invalid_types_ignored(self, mod, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "statusline.json"
+        cfg_file.write_text(
+            json.dumps(
+                {
+                    "figures": "not-a-list",
+                    "min_bar_width": "wide",
+                    "max_width": "big",
+                }
+            )
+        )
+        monkeypatch.setattr(mod, "CONFIG_PATH", cfg_file)
+        config = mod.load_config()
+        assert config["figures"] == mod.DEFAULT_FIGURES
+        assert config["min_bar_width"] == 30
+        assert config["max_width"] is None
+
+
+class TestConfigIntegration:
+    """Integration tests for config-driven figure filtering."""
+
+    def test_hidden_figures_not_in_output(self, mod, monkeypatch, mock_home, tmp_path):
+        cfg_file = tmp_path / "statusline.json"
+        cfg_file.write_text(json.dumps({"figures": ["model", "duration"]}))
+        monkeypatch.setattr(mod, "CONFIG_PATH", cfg_file)
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        assert "🔮" in output  # model included
+        assert "⏱️" in output  # duration included
+        assert "📂" not in output  # cwd hidden
+        assert "💰" not in output  # total hidden
+        assert "👈" not in output  # last hidden
+        assert "⚖️" not in output  # avg hidden
+
+    def test_max_width_override(self, mod, monkeypatch, mock_home, tmp_path):
+        cfg_file = tmp_path / "statusline.json"
+        cfg_file.write_text(json.dumps({"max_width": 120}))
+        monkeypatch.setattr(mod, "CONFIG_PATH", cfg_file)
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        # Divider should be at least 120 chars wide
+        for line in output.splitlines():
+            if "──" in line:
+                # Strip ANSI codes to measure actual width
+                plain = line
+                import re
+
+                plain = re.sub(r"\x1b\[[0-9;]*m", "", plain)
+                assert len(plain) >= 120
+                break
+
+    def test_reordered_figures(self, mod, monkeypatch, mock_home, tmp_path):
+        cfg_file = tmp_path / "statusline.json"
+        cfg_file.write_text(json.dumps({"figures": ["duration", "model"]}))
+        monkeypatch.setattr(mod, "CONFIG_PATH", cfg_file)
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        # Both present
+        assert "🔮" in output
+        assert "⏱️" in output
+        # Duration appears before model
+        dur_pos = output.index("⏱️")
+        model_pos = output.index("🔮")
+        assert dur_pos < model_pos

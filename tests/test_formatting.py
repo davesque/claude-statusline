@@ -111,6 +111,29 @@ class TestFormatCost:
         assert mod.format_cost(val) == expected
 
 
+class TestFormatTimeDelta:
+    """format_time_delta: seconds to human-readable (XdYh, XhYm, Xm)."""
+
+    @pytest.mark.parametrize(
+        "secs, expected",
+        [
+            (0, "0m"),
+            (59, "0m"),
+            (60, "1m"),
+            (3599, "59m"),
+            (3600, "1h0m"),
+            (3660, "1h1m"),
+            (7200, "2h0m"),
+            (86400, "1d0h"),
+            (90000, "1d1h"),
+            (172800, "2d0h"),
+            (259200 + 7200, "3d2h"),
+        ],
+    )
+    def test_values(self, mod, secs, expected):
+        assert mod.format_time_delta(secs) == expected
+
+
 class TestFormatDuration:
     """format_duration: milliseconds to human-readable."""
 

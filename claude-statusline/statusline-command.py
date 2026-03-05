@@ -5,11 +5,11 @@
 # ///
 """Claude Code status line.
 
-Row 1: Model/Dir/Duration       │  Cost last/avg per turn
-Row 2: Session total (burn/hr)  │  Token velocity last/avg per turn
-Row 3: Context bar (full-width, used/tot)
-Row 4: 5h usage bar (pacing marker, ⟳reset)
-Row 5: 7d usage bar (pacing marker, ⟳reset)
+Row 1+: Model/Dir/Git/Duration/Cost figures (flow-wrapped)
+────────────────────────────────────────────
+Bar 1: Context bar (full-width, used/tot)
+Bar 2: 5h usage bar (pacing marker, ⟳reset)
+Bar 3: 7d usage bar (pacing marker, ⟳reset)
 
 Usage data from Anthropic OAuth API.
 """
@@ -22,7 +22,6 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from rich import box
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -38,6 +37,34 @@ BAR_GREEN = "color(65)"
 BAR_YELLOW = "color(137)"
 BAR_RED = "color(131)"
 HOT_PINK = "color(199)"
+
+
+DEFAULT_FIGURES = ["model", "cwd", "git", "duration", "total", "burn", "last", "avg"]
+DEFAULT_MIN_BAR_WIDTH = 30
+CONFIG_PATH = Path.home() / ".claude" / "statusline.json"
+
+
+def load_config() -> dict:
+    """Load user config from ~/.claude/statusline.json, with defaults."""
+    config: dict = {
+        "figures": list(DEFAULT_FIGURES),
+        "min_bar_width": DEFAULT_MIN_BAR_WIDTH,
+        "max_width": None,
+    }
+    try:
+        raw = CONFIG_PATH.read_text()
+        user = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return config
+    if "figures" in user and isinstance(user["figures"], list):
+        config["figures"] = [f for f in user["figures"] if isinstance(f, str)]
+    if "min_bar_width" in user and isinstance(user["min_bar_width"], int):
+        config["min_bar_width"] = max(10, user["min_bar_width"])
+    if "max_width" in user and (
+        isinstance(user["max_width"], int) or user["max_width"] is None
+    ):
+        config["max_width"] = user["max_width"]
+    return config
 
 
 def pct_style(pct: float, green: int = 50, yellow: int = 80) -> str:
@@ -107,9 +134,6 @@ def format_time_delta(seconds: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-FRACTIONAL_BLOCKS = " ▏▎▍▌▋▊▉█"  # index 0=empty, 8=full
-
-
 def build_bar(
     pct: float,
     width: int = 20,
@@ -117,10 +141,8 @@ def build_bar(
     green: int = 50,
     yellow: int = 80,
 ) -> Text:
-    """Build a colored progress bar with sub-character fill precision."""
-    fill = min(pct, 100.0) * width / 100.0
-    full = int(fill)
-    frac = fill - full
+    """Build a colored progress bar as a Rich Text object."""
+    filled = min(int(round(pct)) * width // 100, width)
     style = pct_style(pct, green, yellow)
 
     target_pos = -1
@@ -132,14 +154,8 @@ def build_bar(
     for i in range(width):
         if i == target_pos:
             bar.append("│", style=HOT_PINK)
-        elif i < full:
+        elif i < filled:
             bar.append("█", style=style)
-        elif i == full and full < width:
-            eighth = int(round(frac * 8))
-            if eighth == 0:
-                bar.append("░", style=DIM_GRAY)
-            else:
-                bar.append(FRACTIONAL_BLOCKS[eighth], style=style)
         else:
             bar.append("░", style=DIM_GRAY)
     return bar
@@ -161,6 +177,67 @@ def shorten_dir(path: str, max_len: int = 30) -> str:
     if len(path) > max_len:
         path = "…" + path[-(max_len - 1) :]
     return path
+
+
+def parse_git_status(output: str) -> tuple[str, str] | None:
+    """Parse ``git status --porcelain --branch`` output.
+
+    Returns (branch, indicators) or None if output is empty.
+    Indicators: + staged, * modified, ? untracked, ✓ clean.
+    """
+    lines = output.splitlines()
+    if not lines:
+        return None
+
+    # First line: ## branch...tracking
+    header = lines[0]
+    branch = header.removeprefix("## ").split("...")[0]
+
+    # Parse file status lines
+    has_staged = False
+    has_modified = False
+    has_untracked = False
+    for line in lines[1:]:
+        if len(line) < 2:
+            continue
+        idx, wt = line[0], line[1]
+        if idx in "MADRC":
+            has_staged = True
+        if wt in "MADRC":
+            has_modified = True
+        if idx == "?" and wt == "?":
+            has_untracked = True
+
+    indicators = ""
+    if has_staged:
+        indicators += "+"
+    if has_modified:
+        indicators += "*"
+    if has_untracked:
+        indicators += "?"
+    if not indicators:
+        indicators = "✓"
+
+    return branch, indicators
+
+
+def get_git_info(work_dir: str | None) -> tuple[str, str] | None:
+    """Run ``git status`` in work_dir and parse the result."""
+    if not work_dir:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--branch"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            cwd=work_dir,
+        )
+        if result.returncode != 0:
+            return None
+    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover
+        return None
+    return parse_git_status(result.stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +303,7 @@ def update_velocity(
             )
             + "\n"
         )
-    except OSError:
+    except OSError:  # pragma: no cover
         pass
 
     if turn == 1:
@@ -237,9 +314,9 @@ def update_velocity(
                     try:
                         if f.stat().st_mtime < cutoff:
                             f.unlink(missing_ok=True)
-                    except OSError:
+                    except OSError:  # pragma: no cover
                         pass
-        except OSError:
+        except OSError:  # pragma: no cover
             pass
 
     return tok_delta, tok_ema, cost_delta, cost_ema
@@ -319,7 +396,7 @@ def fetch_usage() -> dict | None:
         tmp = USAGE_CACHE.with_suffix(".tmp")
         tmp.write_text(json.dumps(data))
         tmp.replace(USAGE_CACHE)  # atomic on POSIX
-    except OSError:
+    except OSError:  # pragma: no cover
         pass
 
     return data
@@ -334,7 +411,7 @@ def get_usage(now: float) -> dict | None:
             age = now - USAGE_CACHE.stat().st_mtime
             if age <= USAGE_CACHE_AGE:
                 return cached
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):  # pragma: no cover
         pass
 
     return fetch_usage() or cached
@@ -373,6 +450,53 @@ def pacing_target(resets_at: str, window_secs: int, now: float) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Flow layout
+# ---------------------------------------------------------------------------
+
+
+def flow_figures(
+    figs: list[Text], max_width: int, sep: Text, sep_len: int
+) -> list[Text]:
+    """Pack figures into lines, joining with sep, wrapping when needed."""
+    lines: list[Text] = []
+    line = Text()
+    line_len = 0
+    for fig in figs:
+        fig_len = fig.cell_len
+        if line_len == 0:
+            line.append_text(fig)
+            line_len = fig_len
+        elif line_len + sep_len + fig_len <= max_width:
+            line.append_text(sep)
+            line.append_text(fig)
+            line_len += sep_len + fig_len
+        else:
+            lines.append(line)
+            line = Text()
+            line.append_text(fig)
+            line_len = fig_len
+    if line_len > 0:
+        lines.append(line)
+    return lines
+
+
+def count_flow_lines(figs: list[Text], max_width: int, sep_len: int) -> int:
+    """Count how many lines flow_figures would produce at a given width."""
+    lines = 1
+    line_len = 0
+    for fig in figs:
+        fig_len = fig.cell_len
+        if line_len == 0:
+            line_len = fig_len
+        elif line_len + sep_len + fig_len <= max_width:
+            line_len += sep_len + fig_len
+        else:
+            lines += 1
+            line_len = fig_len
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -388,6 +512,7 @@ def main() -> None:
         return
 
     now = time.time()
+    config = load_config()
 
     # --- Extract fields ---
     model = (data.get("model") or {}).get("display_name", "Unknown")
@@ -421,74 +546,84 @@ def main() -> None:
 
     # === Build layout ===
 
-    # --- Row 1: model/dir/duration │ cost per turn ---
-    r1_left = Text()
-    r1_left.append(model, style="color(255)")
+    # --- Metrics figures (independent units) ---
+    fig_model = Text()
+    fig_model.append("🔮 ")
+    fig_model.append(model, style="color(255)")
+
+    fig_dir = Text()
     if work_dir:
-        r1_left.append(f" {shorten_dir(work_dir)}")
+        fig_dir.append("📂 ")
+        fig_dir.append(shorten_dir(work_dir))
+
+    fig_git = Text()
+    git_info = get_git_info(work_dir)
+    if git_info:
+        branch, indicators = git_info
+        fig_git.append("🌿 ")
+        fig_git.append(branch)
+        fig_git.append(
+            f" {indicators}", style="green" if indicators == "✓" else "yellow"
+        )
+
+    fig_duration = Text()
     if duration_ms is not None:
-        r1_left.append(f" {format_duration(duration_ms)}", style="cyan")
+        fig_duration.append("⏱️ ")
+        fig_duration.append(format_duration(duration_ms), style="cyan")
 
-    r1_right = Text()
-    r1_right.append("last ", style=DIM)
-    r1_right.append(format_cost(cost_delta))
-    r1_right.append(" avg ", style=DIM)
-    r1_right.append(format_cost(cost_ema))
-    r1_right.append("/turn", style=DIM)
+    fig_last = Text()
+    fig_last.append("👈 ")
+    fig_last.append(format_cost(cost_delta))
 
-    # --- Row 2: session total + burn rate │ token velocity ---
-    r2_left = Text()
+    fig_avg = Text()
+    fig_avg.append("⚖️ ")
+    fig_avg.append(format_cost(cost_ema))
+    fig_avg.append("/turn", style=DIM)
+
+    fig_total = Text()
     if cost_usd is not None:
-        r2_left.append("total ", style=DIM)
-        r2_left.append(f"${cost_usd:.2f}")
+        fig_total.append("💰 ")
+        fig_total.append(f"${cost_usd:.2f}")
+
+    fig_burn = Text()
+    if cost_usd is not None:
         if duration_ms is not None and int(duration_ms) // 1000 >= 10:
             hrs = duration_ms / 3_600_000
             burn = f"${cost_usd / hrs:.2f}" if hrs > 0 else "--"
-            r2_left.append(" (", style=DIM)
-            r2_left.append(burn)
-            r2_left.append("/hr)", style=DIM)
+            fig_burn.append("🔥 ")
+            fig_burn.append(burn)
+            fig_burn.append("/hr", style=DIM)
         elif duration_ms is not None:
-            r2_left.append(" (", style=DIM)
-            r2_left.append("--", style=DIM)
-            r2_left.append("/hr)", style=DIM)
+            fig_burn.append("🔥 ")
+            fig_burn.append("--", style=DIM)
+            fig_burn.append("/hr", style=DIM)
 
-    r2_right = Text()
-    r2_right.append("last ", style=DIM)
-    r2_right.append(format_tok(tok_delta))
-    r2_right.append(" avg ", style=DIM)
-    r2_right.append(format_ema(tok_ema))
-    r2_right.append("/turn", style=DIM)
-
-    # --- Compute widths across both rows ---
+    # --- Flow layout for metrics figures ---
     sep = Text(" │ ", style=DIM_GRAY)
-    left_half = max(r1_left.cell_len, r2_left.cell_len)
-    right_half = max(r1_right.cell_len, r2_right.cell_len)
-    content_width = left_half + sep.cell_len + right_half
+    sep_len = sep.cell_len
 
-    def center_text(text: Text, width: int) -> Text:
-        pad = width - text.cell_len
-        lp = pad // 2
-        rp = pad - lp
-        result = Text()
-        if lp > 0:
-            result.append(" " * lp)
-        result.append_text(text)
-        if rp > 0:
-            result.append(" " * rp)
-        return result
-
-    def make_metrics_row(left: Text, right: Text, lw: int, rw: int) -> Text:
-        row = Text()
-        row.append_text(center_text(left, lw))
-        row.append_text(sep)
-        row.append_text(center_text(right, rw))
-        return row
+    # Collect non-empty figures in config-driven order
+    fig_map: dict[str, Text] = {
+        "model": fig_model,
+        "cwd": fig_dir,
+        "git": fig_git,
+        "duration": fig_duration,
+        "total": fig_total,
+        "burn": fig_burn,
+        "last": fig_last,
+        "avg": fig_avg,
+    }
+    figures: list[Text] = [
+        fig_map[key]
+        for key in config["figures"]
+        if key in fig_map and fig_map[key].cell_len > 0
+    ]
 
     # --- Build aligned bar rows ---
     labels = ["ctx", "5h", "7d"]
     label_width = max(len(l) for l in labels)
 
-    # Context suffix
+    # Prepare suffix Text objects
     if ctx_pct is not None:
         ctx_suffix = Text.assemble(
             (f"{int(round(ctx_pct))}%", pct_style(ctx_pct, 60, 85)),
@@ -512,7 +647,9 @@ def main() -> None:
         usage_5h_target = pacing_target(resets_5h, 5 * 3600, now)
         usage_5h_ttl = time_until_reset(resets_5h, now)
         usage_5h_suffix = Text()
-        usage_5h_suffix.append(f"{int(round(usage_5h_pct))}%", style=pct_style(usage_5h_pct))
+        usage_5h_suffix.append(
+            f"{int(round(usage_5h_pct))}%", style=pct_style(usage_5h_pct)
+        )
         if usage_5h_ttl:
             usage_5h_suffix.append(" ⟳", style=DIM)
             usage_5h_suffix.append(usage_5h_ttl)
@@ -528,7 +665,9 @@ def main() -> None:
         usage_7d_target = pacing_target(resets_7d, 7 * 24 * 3600, now)
         usage_7d_ttl = time_until_reset(resets_7d, now)
         usage_7d_suffix = Text()
-        usage_7d_suffix.append(f"{int(round(usage_7d_pct))}%", style=pct_style(usage_7d_pct))
+        usage_7d_suffix.append(
+            f"{int(round(usage_7d_pct))}%", style=pct_style(usage_7d_pct)
+        )
         if usage_7d_ttl:
             usage_7d_suffix.append(" ⟳", style=DIM)
             usage_7d_suffix.append(usage_7d_ttl)
@@ -536,20 +675,31 @@ def main() -> None:
     suffix_width = max(
         ctx_suffix.cell_len, usage_5h_suffix.cell_len, usage_7d_suffix.cell_len
     )
-    min_bar_width = 30
-    bar_width = max(
-        min_bar_width,
-        content_width - label_width - 1 - 1 - suffix_width,
-    )
-    min_bar_content = label_width + 1 + min_bar_width + 1 + suffix_width
-    content_width = max(content_width, min_bar_content)
+    # Layout: "label bar suffix"
+    min_bar_width = config["min_bar_width"]
+    max_bar_nudge = 20  # max extra chars we'll add to bars for better flow
 
-    # Justify metrics rows: distribute extra space evenly to both cells
-    extra = content_width - left_half - sep.cell_len - right_half
-    justified_left = left_half + extra // 2
-    justified_right = content_width - justified_left - sep.cell_len
-    metrics_r1 = make_metrics_row(r1_left, r1_right, justified_left, justified_right)
-    metrics_r2 = make_metrics_row(r2_left, r2_right, justified_left, justified_right)
+    # Find smallest bar width that minimises line count
+    bar_fixed = label_width + 1 + 1 + suffix_width
+    base_width = bar_fixed + min_bar_width
+    best_lines = count_flow_lines(figures, base_width, sep_len)
+    bar_width = min_bar_width
+    for nudge in range(1, max_bar_nudge + 1):
+        candidate = base_width + nudge
+        n = count_flow_lines(figures, candidate, sep_len)
+        if n < best_lines:
+            bar_width = min_bar_width + nudge
+            best_lines = n
+            break  # take the first improvement
+    bar_content_width = bar_fixed + bar_width
+
+    # Apply max_width override: expand bar to fill, or cap at max
+    if config["max_width"] is not None:
+        target_width = max(config["max_width"], bar_content_width)
+        extra = target_width - bar_content_width
+        if extra > 0:
+            bar_width += extra
+            bar_content_width = target_width
 
     def make_bar_row(
         label: str,
@@ -576,34 +726,26 @@ def main() -> None:
         return row
 
     ctx_row = make_bar_row("ctx", ctx_pct, ctx_suffix, green=60, yellow=85)
-    usage_5h_row = make_bar_row(
-        "5h", usage_5h_pct, usage_5h_suffix, usage_5h_target
-    )
-    usage_7d_row = make_bar_row(
-        "7d", usage_7d_pct, usage_7d_suffix, usage_7d_target
-    )
+    usage_5h_row = make_bar_row("5h", usage_5h_pct, usage_5h_suffix, usage_5h_target)
+    usage_7d_row = make_bar_row("7d", usage_7d_pct, usage_7d_suffix, usage_7d_target)
 
-    # --- Render table ---
-    table = Table(
-        show_header=False,
-        box=box.SQUARE,
-        border_style=BORDER_STYLE,
-        padding=(0, 1),
-    )
-    table.add_column(no_wrap=True)
-    table.add_row(metrics_r1)
-    table.add_row(metrics_r2)
-    table.add_section()
-    table.add_row(ctx_row)
-    table.add_row(usage_5h_row)
-    table.add_row(usage_7d_row)
+    # --- Render: flow metrics, divider, bars ---
+    render_width = bar_content_width
+    metrics_lines = flow_figures(figures, render_width, sep, sep_len)
 
-    # Width must accommodate the widest row plus table chrome (borders + padding)
-    # Table adds: 1 (left border) + 1 (left pad) + content + 1 (right pad) + 1 (right border)
-    table_width = content_width + 4
-    console = Console(highlight=False, force_terminal=True, width=table_width)
-    console.print(table, end="")
+    bars_table = Table(show_header=False, box=None, padding=(0, 0))
+    bars_table.add_column(no_wrap=True)
+    bars_table.add_row(ctx_row)
+    bars_table.add_row(usage_5h_row)
+    bars_table.add_row(usage_7d_row)
+
+    divider = Text("─" * render_width, style=BORDER_STYLE)
+    console = Console(highlight=False, force_terminal=True, width=render_width)
+    for line in metrics_lines:
+        console.print(line)
+    console.print(divider)
+    console.print(bars_table, end="")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

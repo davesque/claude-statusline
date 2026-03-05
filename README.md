@@ -1,6 +1,6 @@
 # claude-statusline
 
-A Claude Code status line plugin. Displays a terminal dashboard with model info, session cost, token velocity, context window usage, and 5-hour/7-day usage tracking with pacing markers.
+A Claude Code status line plugin. Displays a terminal dashboard with metrics (model, git branch, session cost, burn rate, per-turn cost), context window and 5-hour/7-day usage progress bars with pacing markers, and reset timers via the Anthropic OAuth API.
 
 ## Install
 
@@ -23,6 +23,54 @@ A Claude Code status line plugin. Displays a terminal dashboard with model info,
    This configures `statusLine` in `~/.claude/settings.json`. The status line appears immediately.
 
 5. **Auth**: The script reads your OAuth token from the macOS keychain (`Claude Code-credentials`) or `~/.claude/.credentials.json` to fetch usage data from the Anthropic API.
+
+## Features
+
+### Metrics (top section)
+
+Flowing figures with emoji labels, wrapping to fit the available width:
+
+| Emoji | Figure | Description |
+|-------|--------|-------------|
+| 🔮 | Model | Claude model powering this session |
+| 📂 | Working directory | Current directory (truncated if long) |
+| 🌿 | Git branch | Branch name + status: `✓` clean, `+` staged, `*` modified, `?` untracked |
+| ⏱️ | Duration | Wall-clock session time |
+| 💰 | Total cost | Cumulative session cost |
+| 🔥 | Burn rate | Cost per hour |
+| 👈 | Last turn | Cost of the most recent turn |
+| ⚖️ | Avg/turn | Exponential moving average cost per turn |
+
+### Progress bars (bottom section)
+
+| Bar | Description |
+|-----|-------------|
+| ctx | Context window usage with color thresholds (green/yellow/red) |
+| 5h | 5-hour rolling usage with a pacing marker showing where usage *should* be |
+| 7d | 7-day rolling usage with a pacing marker showing where usage *should* be |
+
+Reset timers (⟳) show time until each usage window resets.
+
+### Ask for explanations
+
+Ask Claude about any figure and it will give a targeted explanation of what it means and how it's computed:
+
+> "What does the fire emoji mean?"
+> "How is the pacing marker calculated?"
+
+### Customize the layout
+
+Use `/claude-statusline:configure` to change settings interactively:
+
+> "Hide the git and model figures"
+> "Put duration first"
+> "Make the progress bars wider"
+
+Configuration is stored in `~/.claude/statusline.json` and takes effect immediately. Available options:
+
+- **figures** — ordered list of which figures to show (`model`, `cwd`, `git`, `duration`, `total`, `burn`, `last`, `avg`)
+- **min_bar_width** — minimum progress bar width in characters (default: 30)
+- **max_width** — overall status line width override (default: auto)
 
 ## Updating
 
@@ -48,4 +96,4 @@ uv run ruff check .              # Lint
 uv run ruff format --check .     # Format check
 ```
 
-Dev dependencies (pytest, pytest-mock, ruff, ty) are declared in the `[dependency-groups]` section of `pyproject.toml` and managed via `uv.lock`.
+Dev dependencies (pytest, pytest-cov, pytest-mock, ruff, ty) are declared in the `[dependency-groups]` section of `pyproject.toml` and managed via `uv.lock`. 100% test coverage is enforced.

@@ -16,13 +16,27 @@ The repo is a single-plugin marketplace:
 ### Script (`claude-statusline/statusline-command.py`)
 
 Single-file script with these sections:
+- **Config**: `load_config()` reads `~/.claude/statusline.json` for figure selection, bar width, and max width
 - **Styles**: Rich style constants
-- **Formatting helpers**: `format_k`, `format_tok`, `format_ema`, `format_duration`, `format_cost`
+- **Formatting helpers**: `format_k`, `format_tok`, `format_ema`, `format_duration`, `format_cost`, `format_time_delta`
 - **Progress bar**: `build_bar()` returns Rich `Text` with color-coded fill and optional pacing marker
-- **Working directory**: `shorten_dir()` truncates long paths
+- **Working directory**: `shorten_dir()` truncates long paths; `parse_git_status()`/`get_git_info()` show branch and status indicators
 - **Per-turn velocity**: EMA tracking for both tokens and cost, persisted per session in `~/.claude/statusline-state-{session_id}.json`
 - **Usage**: Fetches from Anthropic OAuth API (`/api/oauth/usage`), cached for 60s in `/tmp/claude-statusline-usage.json`. Provides 5-hour and 7-day rolling window utilization percentages with pacing targets and reset timers.
-- **Main**: Parses stdin JSON, builds a Rich `Table` with two metric rows (fully justified, compact pipe separator) and three bar rows (context, 5h usage, 7d usage) with optional right cells for reset timers
+- **Flow layout**: `flow_figures()`/`count_flow_lines()` pack emoji-prefixed metric figures into wrapped lines
+- **Main**: Parses stdin JSON, renders flow-wrapped metric figures (model, cwd, git, duration, cost, burn, last, avg) above a divider, then three bar rows (context, 5h usage, 7d usage)
+
+### Layout
+
+```
+🔮 Model │ 📂 ~/dir │ 🌿 branch ✓ │ ⏱️ 5m12s │ 💰 $1.23 │ 🔥 $14.21/hr │ 👈 $0.50 │ ⚖️ $0.42/turn
+────────────────────────────────────────────────────────────────────
+ctx ████████████░░░░░░░░░░░░░░░░░░ 42% (84k/200k)
+ 5h ████████░░░│░░░░░░░░░░░░░░░░░░ 30% ⟳4h12m
+ 7d █████████████████░░░░░░░░░░░░░ 55% ⟳6d3h
+```
+
+Figures flow-wrap based on available width. Config controls which figures appear and their order.
 
 ## Key conventions
 
@@ -33,12 +47,13 @@ Single-file script with these sections:
 - Usage API: `https://api.anthropic.com/api/oauth/usage`
 - Usage cache write is atomic (write to `.tmp` then `replace()`)
 - Status line config changes take effect immediately — no restart needed
+- User config at `~/.claude/statusline.json` controls `figures` (list), `min_bar_width` (int), `max_width` (int|null)
 
 ## Dev workflow
 
 ```bash
 uv sync                          # Set up dev environment
-uv run pytest                    # Run all tests
+uv run pytest                    # Run all tests (100% coverage required)
 uv run ruff check .              # Lint
 uv run ruff format --check .     # Format check
 uv run ty check                  # Type check
