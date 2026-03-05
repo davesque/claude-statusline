@@ -331,43 +331,13 @@ USAGE_CACHE_AGE = 60  # seconds
 
 
 def get_oauth_token() -> str | None:
-    """Read OAuth access token from keychain (macOS) or credentials file."""
-    # macOS keychain
-    try:
-        result = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-s",
-                "Claude Code-credentials",
-                "-w",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        if result.returncode == 0:
-            creds = json.loads(result.stdout.strip())
-            token = creds.get("claudeAiOauth", {}).get("accessToken")
-            if token:
-                return token
-    except (
-        subprocess.TimeoutExpired,
-        json.JSONDecodeError,
-        FileNotFoundError,
-        OSError,
-    ):
-        pass
-
-    # Fallback: credentials file (~/.claude/.credentials.json)
+    """Read OAuth access token from ~/.claude/.credentials.json."""
     creds_file = Path.home() / ".claude" / ".credentials.json"
     try:
         creds = json.loads(creds_file.read_text())
         return creds.get("claudeAiOauth", {}).get("accessToken")
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
-
-    return None
+        return None
 
 
 def fetch_usage() -> dict | None:

@@ -1,48 +1,31 @@
 """Tests for Anthropic OAuth usage functions."""
 
 import json
-import subprocess
 from unittest.mock import MagicMock, patch
 
 
 class TestGetOauthToken:
-    """get_oauth_token: reading OAuth token from keychain or credentials file."""
+    """get_oauth_token: reading OAuth token from ~/.claude/.credentials.json."""
 
-    def test_keychain_success(self, mod, mock_home):
-        creds = json.dumps({"claudeAiOauth": {"accessToken": "oauth-tok-123"}})
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout=creds)
-            assert mod.get_oauth_token() == "oauth-tok-123"
-
-    def test_keychain_fails_credentials_file(self, mod, mock_home):
+    def test_credentials_file_success(self, mod, mock_home):
         creds_file = mock_home / ".claude" / ".credentials.json"
         creds_file.write_text(
-            json.dumps({"claudeAiOauth": {"accessToken": "file-tok-456"}})
+            json.dumps({"claudeAiOauth": {"accessToken": "tok-123"}})
         )
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="")
-            assert mod.get_oauth_token() == "file-tok-456"
+        assert mod.get_oauth_token() == "tok-123"
 
-    def test_no_credentials_anywhere(self, mod, mock_home):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="")
-            assert mod.get_oauth_token() is None
-
-    def test_keychain_timeout(self, mod, mock_home):
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 3)):
-            assert mod.get_oauth_token() is None
-
-    def test_keychain_json_corrupt(self, mod, mock_home):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="not json")
-            assert mod.get_oauth_token() is None
+    def test_credentials_file_missing(self, mod, mock_home):
+        assert mod.get_oauth_token() is None
 
     def test_credentials_file_missing_key(self, mod, mock_home):
         creds_file = mock_home / ".claude" / ".credentials.json"
         creds_file.write_text(json.dumps({"other": "data"}))
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="")
-            assert mod.get_oauth_token() is None
+        assert mod.get_oauth_token() is None
+
+    def test_credentials_file_corrupt(self, mod, mock_home):
+        creds_file = mock_home / ".claude" / ".credentials.json"
+        creds_file.write_text("not json")
+        assert mod.get_oauth_token() is None
 
 
 class TestFetchUsage:
