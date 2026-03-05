@@ -2,6 +2,8 @@
 
 A Claude Code status line plugin. Displays a terminal dashboard with metrics (model, git branch, session cost, burn rate, per-turn cost), context window and 5-hour/7-day usage progress bars with pacing markers, and reset timers via the Anthropic OAuth API.
 
+![screenshot](screenshot.png)
+
 ## Install
 
 1. **Requirements**: [uv](https://docs.astral.sh/uv/) must be installed. Dependencies (Rich) are managed automatically via PEP 723 inline metadata.
@@ -49,7 +51,7 @@ Flowing figures with emoji labels, wrapping to fit the available width:
 | 5h | 5-hour rolling usage with a pacing marker showing where usage *should* be |
 | 7d | 7-day rolling usage with a pacing marker showing where usage *should* be |
 
-Reset timers (⟳) show time until each usage window resets.
+Reset timers (🔄) show time until each usage window resets.
 
 ### Ask for explanations
 

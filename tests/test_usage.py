@@ -118,7 +118,7 @@ class TestGetUsage:
 
         # No auth → fetch returns None → falls back to stale cache
         with patch.object(mod, "get_oauth_token", return_value=None):
-            now = cache.stat().st_mtime + 120  # 120s old, stale
+            now = cache.stat().st_mtime + 300  # 300s old, stale
             result = mod.get_usage(now)
         assert result == old_data
 
@@ -181,7 +181,7 @@ class TestGetUsage:
             patch.object(mod, "get_oauth_token", return_value="tok-abc"),
             patch("urllib.request.urlopen", return_value=mock_resp),
         ):
-            now = cache.stat().st_mtime + 120  # stale
+            now = cache.stat().st_mtime + 300  # stale
             result = mod.get_usage(now)
         assert result == new_data
 

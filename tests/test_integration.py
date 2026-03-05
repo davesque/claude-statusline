@@ -204,7 +204,7 @@ class TestMainEndToEnd:
         monkeypatch.setattr(time, "time", lambda: cache.stat().st_mtime + 5)
 
         output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
-        assert "⟳" in output  # reset timer indicator
+        assert "⏳" in output  # reset timer indicator
 
 
 class TestLoadConfig:

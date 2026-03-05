@@ -32,8 +32,8 @@ Single-file script with these sections:
 🔮 Model │ 📂 ~/dir │ 🌿 branch ✓ │ ⏱️ 5m12s │ 💰 $1.23 │ 🔥 $14.21/hr │ 👈 $0.50 │ ⚖️ $0.42/turn
 ────────────────────────────────────────────────────────────────────
 ctx ████████████░░░░░░░░░░░░░░░░░░ 42% (84k/200k)
- 5h ████████░░░│░░░░░░░░░░░░░░░░░░ 30% ⟳4h12m
- 7d █████████████████░░░░░░░░░░░░░ 55% ⟳6d3h
+ 5h ████████░░░│░░░░░░░░░░░░░░░░░░ 30% 🔄4h12m
+ 7d █████████████████░░░░░░░░░░░░░ 55% 🔄6d3h
 ```
 
 Figures flow-wrap based on available width. Config controls which figures appear and their order.

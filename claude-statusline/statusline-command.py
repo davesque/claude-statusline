@@ -8,8 +8,8 @@
 Row 1+: Model/Dir/Git/Duration/Cost figures (flow-wrapped)
 ────────────────────────────────────────────
 Bar 1: Context bar (full-width, used/tot)
-Bar 2: 5h usage bar (pacing marker, ⟳reset)
-Bar 3: 7d usage bar (pacing marker, ⟳reset)
+Bar 2: 5h usage bar (pacing marker, ⏳reset)
+Bar 3: 7d usage bar (pacing marker, ⏳reset)
 
 Usage data from Anthropic OAuth API.
 """
@@ -327,7 +327,7 @@ def update_velocity(
 # ---------------------------------------------------------------------------
 
 USAGE_CACHE = Path.home() / ".claude" / "statusline-usage.json"
-USAGE_CACHE_AGE = 60  # seconds
+USAGE_CACHE_AGE = 180  # seconds
 
 
 def get_oauth_token() -> str | None:
@@ -659,7 +659,7 @@ def main() -> None:
             f"{int(round(usage_5h_pct))}%", style=pct_style(usage_5h_pct)
         )
         if usage_5h_ttl:
-            usage_5h_suffix.append(" ⟳", style=DIM)
+            usage_5h_suffix.append(" ⏳ ", style=DIM)
             usage_5h_suffix.append(usage_5h_ttl)
 
     # 7d usage
@@ -677,7 +677,7 @@ def main() -> None:
             f"{int(round(usage_7d_pct))}%", style=pct_style(usage_7d_pct)
         )
         if usage_7d_ttl:
-            usage_7d_suffix.append(" ⟳", style=DIM)
+            usage_7d_suffix.append(" ⏳ ", style=DIM)
             usage_7d_suffix.append(usage_7d_ttl)
 
     suffix_width = max(

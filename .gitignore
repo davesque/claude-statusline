@@ -8,5 +8,4 @@ dist/
 build/
 docs/
 .claude/
-screenshot.png
 .coverage
