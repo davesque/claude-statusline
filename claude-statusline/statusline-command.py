@@ -15,6 +15,7 @@ Usage data from Anthropic OAuth API.
 """
 
 import json
+import os
 import logging
 import logging.handlers
 import subprocess
@@ -167,13 +168,16 @@ class StatusLineContext:
             pass
 
     def fetch_usage(self) -> tuple[dict | None, str | None]:
-        """Fetch usage from Anthropic API and cache it."""
+        """Fetch usage data from the Anthropic API.
+
+        Returns (data, None) on success, or (None, reason) on failure.
+        Does not manage the cache — callers are responsible for that.
+        """
         token = get_oauth_token(self.creds_path)
         if not token:
             self.logger.debug(
                 "fetch_usage: no OAuth token (file and keychain)"
             )
-            self._touch_cache()
             return None, "no_token"
 
         t0 = time.monotonic()
@@ -200,24 +204,24 @@ class StatusLineContext:
                 exc,
                 time.monotonic() - t0,
             )
-            self._touch_cache()
             return None, "api_err"
 
         if "five_hour" not in data or "seven_day" not in data:
             self._warn("usage API response missing expected keys")
             self.logger.debug("fetch_usage: bad response, keys=%s", list(data.keys()))
-            self._touch_cache()
             return None, "bad_response"
 
         self.logger.debug("fetch_usage: ok (%.3fs)", time.monotonic() - t0)
+        return data, None
+
+    def _write_cache(self, data: dict) -> None:
+        """Atomically write data to the usage cache file."""
         try:
             tmp = self.usage_cache.with_suffix(".tmp")
             tmp.write_text(json.dumps(data))
             tmp.replace(self.usage_cache)
         except OSError:  # pragma: no cover
             pass
-
-        return data, None
 
     def get_usage(self) -> tuple[dict | None, str | None]:
         """Return cached usage data, refreshing if stale."""
@@ -230,10 +234,22 @@ class StatusLineContext:
             cached = self._read_cache()
             return cached, (None if cached else "loading")
 
+        # Touch before fetching so concurrent sessions see a fresh mtime
+        # and don't redundantly hit the API.
+        old_mtime = (
+            self.usage_cache.stat().st_mtime if self.usage_cache.exists() else None
+        )
+        self._touch_cache()
+
         data, reason = self.fetch_usage()
         if data:
+            self._write_cache(data)
             return data, None
+
         self.logger.debug("get_usage: fetch failed (%s), falling back to cache", reason)
+        # Restore old mtime so the next invocation retries promptly.
+        if old_mtime is not None:
+            os.utime(self.usage_cache, (old_mtime, old_mtime))
         cached = self._read_cache()
         if cached:
             return cached, reason

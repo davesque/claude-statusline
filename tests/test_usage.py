@@ -133,14 +133,12 @@ class TestFetchUsage:
         data, reason = ctx.fetch_usage()
         assert data == usage_data
         assert reason is None
-        assert ctx.usage_cache.exists()
 
     def test_no_auth_token(self, make_ctx, tmp_path):
         ctx = make_ctx(creds_path=tmp_path / "nonexistent.json")
         data, reason = ctx.fetch_usage()
         assert data is None
         assert reason == "no_token"
-        assert ctx.usage_cache.exists()  # touched to prevent immediate retry
 
     def test_network_error(self, make_ctx, tmp_path):
         def bad_fetch(url, headers, timeout):
@@ -150,7 +148,6 @@ class TestFetchUsage:
         data, reason = ctx.fetch_usage()
         assert data is None
         assert reason == "api_err"
-        assert ctx.usage_cache.exists()
 
     def test_missing_usage_keys(self, make_ctx, tmp_path):
         ctx = make_ctx(
@@ -160,7 +157,6 @@ class TestFetchUsage:
         data, reason = ctx.fetch_usage()
         assert data is None
         assert reason == "bad_response"
-        assert ctx.usage_cache.exists()
 
 
 class TestGetUsage:
