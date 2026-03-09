@@ -244,14 +244,14 @@ class TestGetUsage:
         assert data is None
         assert reason == "loading"
 
-    def test_stale_cache_fallback(self, make_ctx, tmp_path):
+    def test_stale_cache_fallback(self, mod, make_ctx, tmp_path):
         old_data = {"five_hour": {"utilization": 20}, "seven_day": {"utilization": 40}}
         cache = tmp_path / "usage.json"
         cache.write_text(json.dumps(old_data))
 
         # No auth -> fetch returns (None, "no_token") -> falls back to stale cache
         ctx = make_ctx(
-            now=cache.stat().st_mtime + 300,  # stale
+            now=cache.stat().st_mtime + mod.USAGE_CACHE_AGE + 1,  # stale
             creds_path=tmp_path / "nonexistent.json",
         )
         data, reason = ctx.get_usage()
@@ -288,7 +288,7 @@ class TestGetUsage:
         assert data == new_data
         assert reason is None
 
-    def test_stale_cache_refreshes(self, make_ctx, tmp_path):
+    def test_stale_cache_refreshes(self, mod, make_ctx, tmp_path):
         """When cache is stale, fetch new data."""
         cache = tmp_path / "usage.json"
         old_data = {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 20}}
@@ -302,7 +302,7 @@ class TestGetUsage:
         creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok-abc"}}))
 
         ctx = make_ctx(
-            now=cache.stat().st_mtime + 300,  # stale
+            now=cache.stat().st_mtime + mod.USAGE_CACHE_AGE + 1,  # stale
             fetch=lambda u, h, t: json.dumps(new_data).encode(),
             creds_path=creds,
         )

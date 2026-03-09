@@ -821,7 +821,7 @@ def get_git_info(work_dir: str | None) -> tuple[str, str] | None:
 # ---------------------------------------------------------------------------
 
 EMA_ALPHA = 2 / 9  # N=8 turns
-USAGE_CACHE_AGE = 180  # seconds
+USAGE_CACHE_AGE = 300  # seconds
 
 
 def _read_keychain_credentials() -> str | None:
