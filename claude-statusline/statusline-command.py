@@ -171,7 +171,7 @@ class StatusLineContext:
         token = get_oauth_token(self.creds_path)
         if not token:
             self.logger.debug(
-                "fetch_usage: no OAuth token in ~/.claude/.credentials.json"
+                "fetch_usage: no OAuth token (file and keychain)"
             )
             self._touch_cache()
             return None, "no_token"
@@ -794,18 +794,50 @@ EMA_ALPHA = 2 / 9  # N=8 turns
 USAGE_CACHE_AGE = 180  # seconds
 
 
-def get_oauth_token(creds_path: Path | None = None) -> str | None:
-    """Read OAuth access token from credentials file.
+def _read_keychain_credentials() -> str | None:
+    """Read OAuth token from macOS Keychain (fallback when no credentials file).
 
-    Reads from *creds_path* when given, otherwise from
-    ``~/.claude/.credentials.json``.
+    Returns the access token string, or *None* on any failure.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        raw = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if raw.returncode != 0:
+            return None
+        creds = json.loads(raw.stdout)
+        return creds.get("claudeAiOauth", {}).get("accessToken")
+    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def get_oauth_token(creds_path: Path | None = None) -> str | None:
+    """Read OAuth access token from credentials file or macOS Keychain.
+
+    Tries *creds_path* (or ``~/.claude/.credentials.json``) first.
+    Falls back to the macOS Keychain on Darwin when the file is missing.
     """
     creds_file = creds_path or Path.home() / ".claude" / ".credentials.json"
     try:
         creds = json.loads(creds_file.read_text())
         return creds.get("claudeAiOauth", {}).get("accessToken")
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
+        pass
+    # File not found / unreadable — try macOS Keychain
+    if creds_path is None:
+        return _read_keychain_credentials()
+    return None
 
 
 def _reset_epoch(resets_at: str) -> float | None:

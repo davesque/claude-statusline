@@ -36,7 +36,7 @@ Holds injected dependencies: `input_text`, `now`, `state_dir`, `config_path`, `u
 - **Formatting**: `format_k`, `format_tok`, `format_ema`, `format_duration`, `format_cost`, `format_time_delta`, `pct_style`
 - **Progress bar**: `build_bar()` — Rich `Text` with color-coded fill and optional pacing marker
 - **Path helpers**: `shorten_dir()`, `shorten_branch()`, `parse_git_status()`, `get_git_info()`
-- **Auth**: `get_oauth_token()` — reads OAuth token from credentials file
+- **Auth**: `get_oauth_token()` — reads OAuth token from credentials file, falls back to macOS Keychain; `_read_keychain_credentials()` — reads from Keychain via `security` CLI
 - **Usage math**: `_reset_epoch()`, `time_until_reset()`, `pacing_target()`
 - **Flow layout**: `flow_figures()`, `count_flow_lines()`
 

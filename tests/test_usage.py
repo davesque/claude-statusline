@@ -1,6 +1,8 @@
 """Tests for Anthropic OAuth usage functions."""
 
 import json
+import subprocess
+import sys
 
 
 class TestGetOauthToken:
@@ -23,6 +25,91 @@ class TestGetOauthToken:
         creds = tmp_path / "creds.json"
         creds.write_text("not json")
         assert mod.get_oauth_token(creds_path=creds) is None
+
+
+class TestReadKeychainCredentials:
+    """_read_keychain_credentials: macOS Keychain fallback."""
+
+    def test_returns_token_on_darwin(self, mod, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        creds_json = json.dumps({"claudeAiOauth": {"accessToken": "kc-tok"}})
+
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(args[0], 0, stdout=creds_json, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert mod._read_keychain_credentials() == "kc-tok"
+
+    def test_returns_none_on_linux(self, mod, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert mod._read_keychain_credentials() is None
+
+    def test_returns_none_on_nonzero_exit(self, mod, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(args[0], 44, stdout="", stderr="err")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert mod._read_keychain_credentials() is None
+
+    def test_returns_none_on_bad_json(self, mod, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(args[0], 0, stdout="not json", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert mod._read_keychain_credentials() is None
+
+    def test_returns_none_on_missing_key(self, mod, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        creds_json = json.dumps({"other": "data"})
+
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(args[0], 0, stdout=creds_json, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert mod._read_keychain_credentials() is None
+
+    def test_returns_none_on_timeout(self, mod, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(args[0], 5)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert mod._read_keychain_credentials() is None
+
+    def test_returns_none_on_os_error(self, mod, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+
+        def fake_run(*args, **kwargs):
+            raise OSError("no such binary")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert mod._read_keychain_credentials() is None
+
+
+class TestGetOauthTokenKeychainFallback:
+    """get_oauth_token: falls back to keychain when no creds_path given."""
+
+    def test_no_file_falls_back_to_keychain(self, mod, monkeypatch):
+        """When default creds file missing and on darwin, tries keychain."""
+        monkeypatch.setattr(sys, "platform", "darwin")
+        creds_json = json.dumps({"claudeAiOauth": {"accessToken": "kc-tok"}})
+
+        def fake_run(*args, **kwargs):
+            return subprocess.CompletedProcess(args[0], 0, stdout=creds_json, stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        # creds_path=None triggers default path (~/.claude/.credentials.json)
+        # which doesn't exist, so it falls through to keychain
+        assert mod.get_oauth_token() == "kc-tok"
+
+    def test_explicit_creds_path_no_fallback(self, mod, tmp_path):
+        """When creds_path is explicitly given but missing, no keychain fallback."""
+        assert mod.get_oauth_token(creds_path=tmp_path / "nope.json") is None
 
 
 class TestFetchUsage:
