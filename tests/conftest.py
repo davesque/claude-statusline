@@ -32,9 +32,11 @@ def mod():
 
 @pytest.fixture()
 def mock_home(tmp_path, monkeypatch):
-    """Redirect Path.home() to a temp directory with .claude/ created."""
+    """Redirect Path.home() to a temp directory with .claude/statusline/ created."""
     claude_dir = tmp_path / ".claude"
     claude_dir.mkdir()
+    statusline_dir = claude_dir / "statusline"
+    statusline_dir.mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     return tmp_path
 

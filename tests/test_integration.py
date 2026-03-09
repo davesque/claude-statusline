@@ -206,6 +206,31 @@ class TestMainEndToEnd:
         output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
         assert "⏳" in output  # reset timer indicator
 
+    def test_no_token_shows_warning(self, mod, monkeypatch, mock_home, tmp_path):
+        """When there's no OAuth token, warning figure appears."""
+        cache = tmp_path / "usage-cache.json"
+        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
+        monkeypatch.setattr(mod, "get_oauth_token", lambda: None)
+        # Add warning to figures
+        monkeypatch.setattr(
+            mod,
+            "DEFAULT_FIGURES",
+            [*mod.DEFAULT_FIGURES, "warning"],
+        )
+
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        assert "⚠️" in output
+        assert "no token" in output
+
+    def test_no_token_usage_bar_label(self, mod, monkeypatch, mock_home, tmp_path):
+        """When there's no OAuth token, usage bars show 'no token' label."""
+        cache = tmp_path / "usage-cache.json"
+        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
+        monkeypatch.setattr(mod, "get_oauth_token", lambda: None)
+
+        output = _run_main(mod, SAMPLE_INPUT, monkeypatch, mock_home, tmp_path)
+        assert "no token" in output
+
 
 class TestLoadConfig:
     """Tests for load_config()."""
@@ -315,3 +340,39 @@ class TestConfigIntegration:
         dur_pos = output.index("⏱️")
         model_pos = output.index("🔮")
         assert dur_pos < model_pos
+
+
+class TestShortenBranch:
+    """shorten_branch: prefix-aware branch name truncation."""
+
+    def test_short_name_unchanged(self, mod):
+        assert mod.shorten_branch("main") == "main"
+
+    def test_long_name_no_slash(self, mod):
+        name = "a" * 30
+        result = mod.shorten_branch(name, max_len=24)
+        assert len(result) == 24
+        assert result.startswith("…")
+
+    def test_long_name_with_slash(self, mod):
+        name = "feat/implement-very-long-feature-name"
+        result = mod.shorten_branch(name, max_len=24)
+        assert result.startswith("feat/…")
+        assert len(result) == 24
+
+    def test_exact_max_len(self, mod):
+        name = "a" * 24
+        assert mod.shorten_branch(name, max_len=24) == name
+
+    def test_prefix_too_long(self, mod):
+        # Prefix so long that tail_budget < 4 → falls back to simple truncation
+        name = "very-long-prefix-without-slash" + "x" * 10
+        result = mod.shorten_branch(name, max_len=24)
+        assert result.startswith("…")
+        assert len(result) == 24
+
+    def test_slash_prefix_preserved(self, mod):
+        name = "fix/JIRA-12345-some-very-long-description"
+        result = mod.shorten_branch(name, max_len=24)
+        assert result.startswith("fix/")
+        assert "…" in result

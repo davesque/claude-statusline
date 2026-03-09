@@ -15,9 +15,12 @@ Usage data from Anthropic OAuth API.
 """
 
 import json
+import logging
+import logging.handlers
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -41,11 +44,12 @@ HOT_PINK = "color(199)"
 
 DEFAULT_FIGURES = ["model", "cwd", "git", "duration", "total", "burn", "last", "avg"]
 DEFAULT_MIN_BAR_WIDTH = 30
-CONFIG_PATH = Path.home() / ".claude" / "statusline.json"
+STATE_DIR = Path.home() / ".claude" / "statusline"
+CONFIG_PATH = STATE_DIR / "config.json"
 
 
 def load_config() -> dict:
-    """Load user config from ~/.claude/statusline.json, with defaults."""
+    """Load user config from ~/.claude/statusline/config.json, with defaults."""
     config: dict = {
         "figures": list(DEFAULT_FIGURES),
         "min_bar_width": DEFAULT_MIN_BAR_WIDTH,
@@ -179,6 +183,25 @@ def shorten_dir(path: str, max_len: int = 30) -> str:
     return path
 
 
+def shorten_branch(name: str, max_len: int = 24) -> str:
+    """Shorten a branch name with prefix-aware truncation.
+
+    Keeps the first path segment (e.g. ``feat/``) and the tail,
+    replacing the middle with ``…``.  Falls back to simple tail
+    truncation for branches without ``/``.
+    """
+    if len(name) <= max_len:
+        return name
+    slash = name.find("/")
+    if slash != -1:
+        prefix = name[: slash + 1]  # e.g. "feat/"
+        tail_budget = max_len - len(prefix) - 1  # -1 for "…"
+        if tail_budget >= 4:
+            return prefix + "…" + name[-(tail_budget):]
+    # No slash or prefix too long — simple tail truncation
+    return "…" + name[-(max_len - 1) :]
+
+
 def parse_git_status(output: str) -> tuple[str, str] | None:
     """Parse ``git status --porcelain --branch`` output.
 
@@ -251,8 +274,7 @@ def update_velocity(
     session_id: str, total_tokens: int, total_cost: float
 ) -> tuple[int, float, float, float]:
     """Update EMA state and return (tok_delta, tok_ema, cost_delta, cost_ema)."""
-    state_dir = Path.home() / ".claude"
-    state_file = state_dir / f"statusline-state-{session_id}.json"
+    state_file = STATE_DIR / f"state-{session_id}.json"
 
     prev_tokens = 0
     prev_tok_ema = 0.0
@@ -309,7 +331,7 @@ def update_velocity(
     if turn == 1:
         try:
             cutoff = time.time() - 86400
-            for f in state_dir.glob("statusline-state-*.json"):
+            for f in STATE_DIR.glob("state-*.json"):
                 if f != state_file:
                     try:
                         if f.stat().st_mtime < cutoff:
@@ -326,8 +348,28 @@ def update_velocity(
 # Usage quota (Anthropic OAuth API)
 # ---------------------------------------------------------------------------
 
-USAGE_CACHE = Path.home() / ".claude" / "statusline-usage.json"
+USAGE_CACHE = STATE_DIR / "usage.json"
 USAGE_CACHE_AGE = 180  # seconds
+
+DEBUG_LOG = STATE_DIR / "debug.log"
+_log = logging.getLogger("statusline")
+_log.setLevel(logging.DEBUG)
+try:
+    _log_handler = logging.handlers.RotatingFileHandler(
+        DEBUG_LOG, maxBytes=100_000, backupCount=1
+    )
+    _log_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(process)d] %(message)s", datefmt="%H:%M:%S")
+    )
+    _log.addHandler(_log_handler)
+except OSError:  # pragma: no cover
+    pass
+
+
+def _warn(msg: str) -> None:
+    """Print a diagnostic message to stderr."""
+    print(f"statusline: {msg}", file=sys.stderr)
+    _log.warning(msg)
 
 
 def get_oauth_token() -> str | None:
@@ -348,13 +390,18 @@ def _touch_cache() -> None:
         pass
 
 
-def fetch_usage() -> dict | None:
-    """Fetch usage from Anthropic API and cache it."""
+def fetch_usage() -> tuple[dict | None, str | None]:
+    """Fetch usage from Anthropic API and cache it.
+
+    Returns (data, reason) where reason is a failure code or None on success.
+    """
     token = get_oauth_token()
     if not token:
+        _warn("no OAuth token in ~/.claude/.credentials.json")
         _touch_cache()
-        return None
+        return None, "no_token"
 
+    t0 = time.monotonic()
     try:
         req = urllib.request.Request(
             "https://api.anthropic.com/api/oauth/usage",
@@ -365,14 +412,24 @@ def fetch_usage() -> dict | None:
         )
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read())
-    except Exception:
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
+        _warn(f"usage API request failed: {exc}")
+        _log.debug(
+            "fetch_usage: %s: %s (%.3fs)",
+            type(exc).__name__,
+            exc,
+            time.monotonic() - t0,
+        )
         _touch_cache()
-        return None
+        return None, "api_err"
 
     if "five_hour" not in data or "seven_day" not in data:
+        _warn("usage API response missing expected keys")
+        _log.debug("fetch_usage: bad response, keys=%s", list(data.keys()))
         _touch_cache()
-        return None
+        return None, "bad_response"
 
+    _log.debug("fetch_usage: ok (%.3fs)", time.monotonic() - t0)
     try:
         tmp = USAGE_CACHE.with_suffix(".tmp")
         tmp.write_text(json.dumps(data))
@@ -380,7 +437,7 @@ def fetch_usage() -> dict | None:
     except OSError:  # pragma: no cover
         pass
 
-    return data
+    return data, None
 
 
 def _read_cache() -> dict | None:
@@ -402,27 +459,33 @@ def _cache_is_fresh(now: float) -> bool:
         return False
 
 
-def get_usage(now: float) -> dict | None:
+def get_usage(now: float) -> tuple[dict | None, str | None]:
     """Return cached usage data, refreshing if stale.
+
+    Returns (data, reason) where reason is a failure code or None on success.
 
     On first run (no cache file), creates a placeholder and fetches
     immediately.  The placeholder's fresh mtime prevents concurrent
-    instances from also fetching.
-
-    Note: file locking (fcntl.flock) was considered but not implemented.
-    Without it, multiple concurrent instances may all see a stale cache
-    and each refresh independently.  This is acceptable since every
-    failure path touches the cache mtime, bounding retries to once per
-    TTL per instance regardless of outcome.
+    instances from also fetching.  Every failure path touches the cache
+    mtime, bounding retries to once per TTL regardless of outcome.
     """
     first_run = not USAGE_CACHE.exists()
     if first_run:
+        _log.debug("get_usage: first_run, creating placeholder")
         _touch_cache()
 
     if not first_run and _cache_is_fresh(now):
-        return _read_cache()
+        cached = _read_cache()
+        return cached, (None if cached else "loading")
 
-    return fetch_usage() or _read_cache()
+    data, reason = fetch_usage()
+    if data:
+        return data, None
+    _log.debug("get_usage: fetch failed (%s), falling back to cache", reason)
+    cached = _read_cache()
+    if cached:
+        return cached, reason  # stale cache is usable, but propagate failure reason
+    return None, reason
 
 
 def _reset_epoch(resets_at: str) -> float | None:
@@ -522,6 +585,8 @@ def main() -> None:
     now = time.time()
     config = load_config()
 
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+
     # --- Extract fields ---
     model = (data.get("model") or {}).get("display_name", "Unknown")
     session_id = data.get("session_id", "unknown")
@@ -550,7 +615,7 @@ def main() -> None:
     )
 
     # --- Usage quota ---
-    usage = get_usage(now)
+    usage, usage_reason = get_usage(now)
 
     # === Build layout ===
 
@@ -569,7 +634,7 @@ def main() -> None:
     if git_info:
         branch, indicators = git_info
         fig_git.append("🌿 ")
-        fig_git.append(branch)
+        fig_git.append(shorten_branch(branch))
         fig_git.append(
             f" {indicators}", style="green" if indicators == "✓" else "yellow"
         )
@@ -606,6 +671,11 @@ def main() -> None:
             fig_burn.append("--", style=DIM)
             fig_burn.append("/hr", style=DIM)
 
+    fig_warning = Text()
+    if usage_reason == "no_token":
+        fig_warning.append("⚠️ ")
+        fig_warning.append("no token", style="yellow")
+
     # --- Flow layout for metrics figures ---
     sep = Text(" │ ", style=DIM_GRAY)
     sep_len = sep.cell_len
@@ -620,6 +690,7 @@ def main() -> None:
         "burn": fig_burn,
         "last": fig_last,
         "avg": fig_avg,
+        "warning": fig_warning,
     }
     figures: list[Text] = [
         fig_map[key]
@@ -680,6 +751,15 @@ def main() -> None:
             usage_7d_suffix.append(" ⏳ ", style=DIM)
             usage_7d_suffix.append(usage_7d_ttl)
 
+    # --- Usage bar labels (shown when no data) ---
+    usage_labels: dict[str | None, str] = {
+        "no_token": "no token",
+        "api_err": "api error",
+        "bad_response": "bad response",
+        "loading": "loading\u2026",
+    }
+    usage_bar_label = usage_labels.get(usage_reason, "no data")
+
     suffix_width = max(
         ctx_suffix.cell_len, usage_5h_suffix.cell_len, usage_7d_suffix.cell_len
     )
@@ -716,14 +796,14 @@ def main() -> None:
         target_pct: float | None = None,
         green: int = 50,
         yellow: int = 80,
+        bar_label: str = "no data",
     ) -> Text:
         row = Text()
         row.append(label.rjust(label_width), style=DIM)
         row.append(" ")
         if pct is None:
-            no_data = "no data"
-            row.append(no_data, style=DIM_GRAY)
-            row.append(" " * (bar_width - len(no_data)))
+            row.append(bar_label, style=DIM_GRAY)
+            row.append(" " * (bar_width - len(bar_label)))
         else:
             row.append_text(build_bar(pct, bar_width, target_pct, green, yellow))
         row.append(" ")
@@ -734,8 +814,20 @@ def main() -> None:
         return row
 
     ctx_row = make_bar_row("ctx", ctx_pct, ctx_suffix, green=60, yellow=85)
-    usage_5h_row = make_bar_row("5h", usage_5h_pct, usage_5h_suffix, usage_5h_target)
-    usage_7d_row = make_bar_row("7d", usage_7d_pct, usage_7d_suffix, usage_7d_target)
+    usage_5h_row = make_bar_row(
+        "5h",
+        usage_5h_pct,
+        usage_5h_suffix,
+        usage_5h_target,
+        bar_label=usage_bar_label,
+    )
+    usage_7d_row = make_bar_row(
+        "7d",
+        usage_7d_pct,
+        usage_7d_suffix,
+        usage_7d_target,
+        bar_label=usage_bar_label,
+    )
 
     # --- Render: flow metrics, divider, bars ---
     render_width = bar_content_width
@@ -752,7 +844,12 @@ def main() -> None:
     for line in metrics_lines:
         console.print(line)
     console.print(divider)
-    console.print(bars_table, end="")
+    if fig_warning.cell_len > 0:
+        console.print(bars_table)
+        console.print(divider)
+        console.print(fig_warning, end="")
+    else:
+        console.print(bars_table, end="")
 
 
 if __name__ == "__main__":  # pragma: no cover

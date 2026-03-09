@@ -16,13 +16,14 @@ The repo is a single-plugin marketplace:
 ### Script (`claude-statusline/statusline-command.py`)
 
 Single-file script with these sections:
-- **Config**: `load_config()` reads `~/.claude/statusline.json` for figure selection, bar width, and max width
+- **Config**: `load_config()` reads `~/.claude/statusline/config.json` for figure selection, bar width, and max width
 - **Styles**: Rich style constants
 - **Formatting helpers**: `format_k`, `format_tok`, `format_ema`, `format_duration`, `format_cost`, `format_time_delta`
 - **Progress bar**: `build_bar()` returns Rich `Text` with color-coded fill and optional pacing marker
-- **Working directory**: `shorten_dir()` truncates long paths; `parse_git_status()`/`get_git_info()` show branch and status indicators
-- **Per-turn velocity**: EMA tracking for both tokens and cost, persisted per session in `~/.claude/statusline-state-{session_id}.json`
-- **Usage**: Fetches from Anthropic OAuth API (`/api/oauth/usage`), cached for 60s in `/tmp/claude-statusline-usage.json`. Provides 5-hour and 7-day rolling window utilization percentages with pacing targets and reset timers.
+- **Working directory**: `shorten_dir()` truncates long paths; `shorten_branch()` truncates long branch names; `parse_git_status()`/`get_git_info()` show branch and status indicators
+- **Per-turn velocity**: EMA tracking for both tokens and cost, persisted per session in `~/.claude/statusline/state-{session_id}.json`
+- **Usage**: Fetches from Anthropic OAuth API (`/api/oauth/usage`), cached for 180s in `~/.claude/statusline/usage.json`. Returns `(data, reason)` tuples for structured error handling. Provides 5-hour and 7-day rolling window utilization percentages with pacing targets and reset timers.
+- **Logging**: Debug logging via `RotatingFileHandler` to `~/.claude/statusline/debug.log` (100KB max). `_warn()` prints diagnostics to stderr.
 - **Flow layout**: `flow_figures()`/`count_flow_lines()` pack emoji-prefixed metric figures into wrapped lines
 - **Main**: Parses stdin JSON, renders flow-wrapped metric figures (model, cwd, git, duration, cost, burn, last, avg) above a divider, then three bar rows (context, 5h usage, 7d usage)
 
@@ -47,7 +48,8 @@ Figures flow-wrap based on available width. Config controls which figures appear
 - Usage API: `https://api.anthropic.com/api/oauth/usage`
 - Usage cache write is atomic (write to `.tmp` then `replace()`)
 - Status line config changes take effect immediately — no restart needed
-- User config at `~/.claude/statusline.json` controls `figures` (list), `min_bar_width` (int), `max_width` (int|null)
+- All state files consolidated under `~/.claude/statusline/` (config, state, cache, debug log)
+- User config at `~/.claude/statusline/config.json` controls `figures` (list), `min_bar_width` (int), `max_width` (int|null)
 
 ## Dev workflow
 

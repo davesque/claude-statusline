@@ -6,6 +6,12 @@ import time
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _patch_state_dir(mod, mock_home, monkeypatch):
+    """Point STATE_DIR to the mock home's statusline directory."""
+    monkeypatch.setattr(mod, "STATE_DIR", mock_home / ".claude" / "statusline")
+
+
 class TestUpdateVelocity:
     """update_velocity: EMA calculations and state file management."""
 
@@ -44,7 +50,7 @@ class TestUpdateVelocity:
 
     def test_state_file_created(self, mod, mock_home):
         mod.update_velocity("test-sess", 1000, 0.50)
-        state_file = mock_home / ".claude" / "statusline-state-test-sess.json"
+        state_file = mock_home / ".claude" / "statusline" / "state-test-sess.json"
         assert state_file.exists()
         state = json.loads(state_file.read_text())
         assert state["turn"] == 1
@@ -53,13 +59,13 @@ class TestUpdateVelocity:
     def test_state_file_updated(self, mod, mock_home):
         mod.update_velocity("test-sess", 1000, 0.50)
         mod.update_velocity("test-sess", 2000, 1.00)
-        state_file = mock_home / ".claude" / "statusline-state-test-sess.json"
+        state_file = mock_home / ".claude" / "statusline" / "state-test-sess.json"
         state = json.loads(state_file.read_text())
         assert state["turn"] == 2
         assert state["total_tokens"] == 2000
 
     def test_corrupted_state_recovery(self, mod, mock_home):
-        state_file = mock_home / ".claude" / "statusline-state-test-sess.json"
+        state_file = mock_home / ".claude" / "statusline" / "state-test-sess.json"
         state_file.write_text("not json{{{")
         # Should recover gracefully
         tok_delta, tok_ema, cost_delta, cost_ema = mod.update_velocity(
@@ -77,9 +83,9 @@ class TestUpdateVelocity:
         assert tok_ema == 500.0
 
     def test_old_state_cleanup(self, mod, mock_home, monkeypatch):
-        claude_dir = mock_home / ".claude"
+        state_dir = mock_home / ".claude" / "statusline"
         # Create an old state file
-        old_file = claude_dir / "statusline-state-old-session.json"
+        old_file = state_dir / "state-old-session.json"
         old_file.write_text(json.dumps({"turn": 1, "total_tokens": 0}))
 
         # Make the old file look older than 24h by backdating mtime
@@ -93,8 +99,8 @@ class TestUpdateVelocity:
         assert not old_file.exists()
 
     def test_recent_state_not_cleaned(self, mod, mock_home):
-        claude_dir = mock_home / ".claude"
-        recent_file = claude_dir / "statusline-state-recent.json"
+        state_dir = mock_home / ".claude" / "statusline"
+        recent_file = state_dir / "state-recent.json"
         recent_file.write_text(json.dumps({"turn": 1, "total_tokens": 0}))
 
         mod.update_velocity("new-sess", 1000, 0.50)
