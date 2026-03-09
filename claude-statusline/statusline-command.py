@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +41,272 @@ BAR_GREEN = "color(65)"
 BAR_YELLOW = "color(137)"
 BAR_RED = "color(131)"
 HOT_PINK = "color(199)"
+
+
+def _default_fetch(
+    url: str, headers: dict[str, str], timeout: int
+) -> bytes:  # pragma: no cover
+    """Default HTTP fetcher wrapping urllib."""
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+class StatusLineContext:
+    """Holds all injectable dependencies for the status line."""
+
+    def __init__(
+        self,
+        input_text: str,
+        now: float,
+        state_dir: Path,
+        config_path: Path,
+        usage_cache: Path,
+        debug_log: Path,
+        logger: logging.Logger,
+        console: Console,
+        fetch: Callable[[str, dict[str, str], int], bytes],
+    ) -> None:  # pragma: no cover
+        self.input_text = input_text
+        self.now = now
+        self.state_dir = state_dir
+        self.config_path = config_path
+        self.usage_cache = usage_cache
+        self.debug_log = debug_log
+        self.logger = logger
+        self.console = console
+        self.fetch = fetch
+
+    @classmethod
+    def create(cls, input_text: str) -> "StatusLineContext":  # pragma: no cover
+        """Build a production context with real paths and I/O."""
+        state_dir = Path.home() / ".claude" / "statusline"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        logger = logging.getLogger("statusline")
+        logger.setLevel(logging.DEBUG)
+        return cls(
+            input_text=input_text,
+            now=time.time(),
+            state_dir=state_dir,
+            config_path=state_dir / "config.json",
+            usage_cache=state_dir / "usage.json",
+            debug_log=state_dir / "debug.log",
+            logger=logger,
+            console=Console(highlight=False, force_terminal=True),
+            fetch=_default_fetch,
+        )
+
+    def load_config(self) -> dict:  # pragma: no cover
+        """Load user config from config_path, with defaults."""
+        config: dict = {
+            "figures": list(DEFAULT_FIGURES),
+            "min_bar_width": DEFAULT_MIN_BAR_WIDTH,
+            "max_width": None,
+        }
+        try:
+            raw = self.config_path.read_text()
+            user = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return config
+        if "figures" in user and isinstance(user["figures"], list):
+            config["figures"] = [f for f in user["figures"] if isinstance(f, str)]
+        if "min_bar_width" in user and isinstance(user["min_bar_width"], int):
+            config["min_bar_width"] = max(10, user["min_bar_width"])
+        if "max_width" in user and (
+            isinstance(user["max_width"], int) or user["max_width"] is None
+        ):
+            config["max_width"] = user["max_width"]
+        return config
+
+    def _warn(self, msg: str) -> None:  # pragma: no cover
+        """Print a diagnostic message to stderr."""
+        print(f"statusline: {msg}", file=sys.stderr)
+        self.logger.warning(msg)
+
+    def _touch_cache(self) -> None:  # pragma: no cover
+        """Update cache mtime to prevent immediate retry after a failed fetch."""
+        try:
+            self.usage_cache.touch(exist_ok=True)
+        except OSError:  # pragma: no cover
+            pass
+
+    def _read_cache(self) -> dict | None:  # pragma: no cover
+        """Read and parse the cache file."""
+        try:
+            data = json.loads(self.usage_cache.read_text())
+            if "five_hour" in data and "seven_day" in data:
+                return data
+        except (json.JSONDecodeError, FileNotFoundError, OSError):
+            pass
+        return None
+
+    def _cache_is_fresh(self) -> bool:  # pragma: no cover
+        """Check if the cache file exists with an mtime within the TTL."""
+        try:
+            return (self.now - self.usage_cache.stat().st_mtime) <= USAGE_CACHE_AGE
+        except OSError:  # pragma: no cover
+            return False
+
+    def init_logging(self) -> None:  # pragma: no cover
+        """Attach the rotating file handler to the logger."""
+        if self.logger.handlers:
+            return
+        try:
+            handler = logging.handlers.RotatingFileHandler(
+                self.debug_log, maxBytes=100_000, backupCount=1
+            )
+            handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s [%(process)d] %(message)s", datefmt="%H:%M:%S"
+                )
+            )
+            self.logger.addHandler(handler)
+        except OSError:  # pragma: no cover
+            pass
+
+    def fetch_usage(self) -> tuple[dict | None, str | None]:  # pragma: no cover
+        """Fetch usage from Anthropic API and cache it."""
+        token = get_oauth_token()
+        if not token:
+            self.logger.debug(
+                "fetch_usage: no OAuth token in ~/.claude/.credentials.json"
+            )
+            self._touch_cache()
+            return None, "no_token"
+
+        t0 = time.monotonic()
+        try:
+            raw = self.fetch(
+                "https://api.anthropic.com/api/oauth/usage",
+                {
+                    "Authorization": f"Bearer {token}",
+                    "anthropic-beta": "oauth-2025-04-20",
+                },
+                3,
+            )
+            data = json.loads(raw)
+        except (
+            urllib.error.URLError,
+            OSError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
+            self._warn(f"usage API request failed: {exc}")
+            self.logger.debug(
+                "fetch_usage: %s: %s (%.3fs)",
+                type(exc).__name__,
+                exc,
+                time.monotonic() - t0,
+            )
+            self._touch_cache()
+            return None, "api_err"
+
+        if "five_hour" not in data or "seven_day" not in data:
+            self._warn("usage API response missing expected keys")
+            self.logger.debug("fetch_usage: bad response, keys=%s", list(data.keys()))
+            self._touch_cache()
+            return None, "bad_response"
+
+        self.logger.debug("fetch_usage: ok (%.3fs)", time.monotonic() - t0)
+        try:
+            tmp = self.usage_cache.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.replace(self.usage_cache)
+        except OSError:  # pragma: no cover
+            pass
+
+        return data, None
+
+    def get_usage(self) -> tuple[dict | None, str | None]:  # pragma: no cover
+        """Return cached usage data, refreshing if stale."""
+        first_run = not self.usage_cache.exists()
+        if first_run:
+            self.logger.debug("get_usage: first_run, creating placeholder")
+            self._touch_cache()
+
+        if not first_run and self._cache_is_fresh():
+            cached = self._read_cache()
+            return cached, (None if cached else "loading")
+
+        data, reason = self.fetch_usage()
+        if data:
+            return data, None
+        self.logger.debug("get_usage: fetch failed (%s), falling back to cache", reason)
+        cached = self._read_cache()
+        if cached:
+            return cached, reason
+        return None, reason
+
+    def update_velocity(  # pragma: no cover
+        self, session_id: str, total_tokens: int, total_cost: float
+    ) -> tuple[int, float, float, float]:
+        """Update EMA state and return (tok_delta, tok_ema, cost_delta, cost_ema)."""
+        state_file = self.state_dir / f"state-{session_id}.json"
+
+        prev_tokens = 0
+        prev_tok_ema = 0.0
+        prev_cost = 0.0
+        prev_cost_ema = 0.0
+        turn = 0
+
+        try:
+            state = json.loads(state_file.read_text())
+            prev_tokens = state.get("total_tokens", 0)
+            prev_tok_ema = state.get("ema", 0.0)
+            prev_cost = state.get("total_cost", 0.0)
+            prev_cost_ema = state.get("cost_ema", 0.0)
+            turn = state.get("turn", 0)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+        tok_delta = total_tokens - prev_tokens
+        cost_delta = total_cost - prev_cost
+
+        if tok_delta == 0 and cost_delta < 0.0001:
+            return tok_delta, prev_tok_ema, cost_delta, prev_cost_ema
+
+        turn += 1
+        tok_ema = (
+            float(tok_delta)
+            if turn <= 1
+            else EMA_ALPHA * tok_delta + (1 - EMA_ALPHA) * prev_tok_ema
+        )
+        cost_ema = (
+            cost_delta
+            if turn <= 1
+            else EMA_ALPHA * cost_delta + (1 - EMA_ALPHA) * prev_cost_ema
+        )
+
+        try:
+            state_file.write_text(
+                json.dumps(
+                    {
+                        "turn": turn,
+                        "total_tokens": total_tokens,
+                        "ema": round(tok_ema, 1),
+                        "total_cost": round(total_cost, 6),
+                        "cost_ema": round(cost_ema, 6),
+                    }
+                )
+                + "\n"
+            )
+        except OSError:  # pragma: no cover
+            pass
+
+        if turn == 1:
+            try:
+                cutoff = self.now - 86400
+                for f in self.state_dir.glob("state-*.json"):
+                    if f != state_file:
+                        try:
+                            if f.stat().st_mtime < cutoff:
+                                f.unlink(missing_ok=True)
+                        except OSError:  # pragma: no cover
+                            pass
+            except OSError:  # pragma: no cover
+                pass
+
+        return tok_delta, tok_ema, cost_delta, cost_ema
 
 
 DEFAULT_FIGURES = ["model", "cwd", "git", "duration", "total", "burn", "last", "avg"]
@@ -354,16 +621,29 @@ USAGE_CACHE_AGE = 180  # seconds
 DEBUG_LOG = STATE_DIR / "debug.log"
 _log = logging.getLogger("statusline")
 _log.setLevel(logging.DEBUG)
-try:
-    _log_handler = logging.handlers.RotatingFileHandler(
-        DEBUG_LOG, maxBytes=100_000, backupCount=1
-    )
-    _log_handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(process)d] %(message)s", datefmt="%H:%M:%S")
-    )
-    _log.addHandler(_log_handler)
-except OSError:  # pragma: no cover
-    pass
+
+
+def _init_logging() -> None:
+    """Attach the rotating file handler to the module logger.
+
+    Called once from main().  Separated so that test imports don't
+    create the real log file — tests can add their own handler if
+    they need to verify log output.
+    """
+    if _log.handlers:
+        return  # already initialised (or test-injected)
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            DEBUG_LOG, maxBytes=100_000, backupCount=1
+        )
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(process)d] %(message)s", datefmt="%H:%M:%S"
+            )
+        )
+        _log.addHandler(handler)
+    except OSError:  # pragma: no cover
+        pass
 
 
 def _warn(msg: str) -> None:
@@ -372,9 +652,9 @@ def _warn(msg: str) -> None:
     _log.warning(msg)
 
 
-def get_oauth_token() -> str | None:
+def get_oauth_token(creds_path: Path | None = None) -> str | None:
     """Read OAuth access token from ~/.claude/.credentials.json."""
-    creds_file = Path.home() / ".claude" / ".credentials.json"
+    creds_file = creds_path or Path.home() / ".claude" / ".credentials.json"
     try:
         creds = json.loads(creds_file.read_text())
         return creds.get("claudeAiOauth", {}).get("accessToken")
@@ -397,7 +677,7 @@ def fetch_usage() -> tuple[dict | None, str | None]:
     """
     token = get_oauth_token()
     if not token:
-        _warn("no OAuth token in ~/.claude/.credentials.json")
+        _log.debug("fetch_usage: no OAuth token in ~/.claude/.credentials.json")
         _touch_cache()
         return None, "no_token"
 
@@ -586,6 +866,7 @@ def main() -> None:
     config = load_config()
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _init_logging()
 
     # --- Extract fields ---
     model = (data.get("model") or {}).get("display_name", "Unknown")
