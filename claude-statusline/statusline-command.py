@@ -66,7 +66,8 @@ class StatusLineContext:
         logger: logging.Logger,
         console: Console,
         fetch: Callable[[str, dict[str, str], int], bytes],
-    ) -> None:  # pragma: no cover
+        creds_path: Path | None = None,
+    ) -> None:
         self.input_text = input_text
         self.now = now
         self.state_dir = state_dir
@@ -76,6 +77,7 @@ class StatusLineContext:
         self.logger = logger
         self.console = console
         self.fetch = fetch
+        self.creds_path = creds_path
 
     @classmethod
     def create(cls, input_text: str) -> "StatusLineContext":  # pragma: no cover
@@ -96,7 +98,7 @@ class StatusLineContext:
             fetch=_default_fetch,
         )
 
-    def load_config(self) -> dict:  # pragma: no cover
+    def load_config(self) -> dict:
         """Load user config from config_path, with defaults."""
         config: dict = {
             "figures": list(DEFAULT_FIGURES),
@@ -118,19 +120,19 @@ class StatusLineContext:
             config["max_width"] = user["max_width"]
         return config
 
-    def _warn(self, msg: str) -> None:  # pragma: no cover
+    def _warn(self, msg: str) -> None:
         """Print a diagnostic message to stderr."""
         print(f"statusline: {msg}", file=sys.stderr)
         self.logger.warning(msg)
 
-    def _touch_cache(self) -> None:  # pragma: no cover
+    def _touch_cache(self) -> None:
         """Update cache mtime to prevent immediate retry after a failed fetch."""
         try:
             self.usage_cache.touch(exist_ok=True)
         except OSError:  # pragma: no cover
             pass
 
-    def _read_cache(self) -> dict | None:  # pragma: no cover
+    def _read_cache(self) -> dict | None:
         """Read and parse the cache file."""
         try:
             data = json.loads(self.usage_cache.read_text())
@@ -140,14 +142,14 @@ class StatusLineContext:
             pass
         return None
 
-    def _cache_is_fresh(self) -> bool:  # pragma: no cover
+    def _cache_is_fresh(self) -> bool:
         """Check if the cache file exists with an mtime within the TTL."""
         try:
             return (self.now - self.usage_cache.stat().st_mtime) <= USAGE_CACHE_AGE
         except OSError:  # pragma: no cover
             return False
 
-    def init_logging(self) -> None:  # pragma: no cover
+    def init_logging(self) -> None:
         """Attach the rotating file handler to the logger."""
         if self.logger.handlers:
             return
@@ -164,9 +166,9 @@ class StatusLineContext:
         except OSError:  # pragma: no cover
             pass
 
-    def fetch_usage(self) -> tuple[dict | None, str | None]:  # pragma: no cover
+    def fetch_usage(self) -> tuple[dict | None, str | None]:
         """Fetch usage from Anthropic API and cache it."""
-        token = get_oauth_token()
+        token = get_oauth_token(self.creds_path)
         if not token:
             self.logger.debug(
                 "fetch_usage: no OAuth token in ~/.claude/.credentials.json"
@@ -217,7 +219,7 @@ class StatusLineContext:
 
         return data, None
 
-    def get_usage(self) -> tuple[dict | None, str | None]:  # pragma: no cover
+    def get_usage(self) -> tuple[dict | None, str | None]:
         """Return cached usage data, refreshing if stale."""
         first_run = not self.usage_cache.exists()
         if first_run:
@@ -237,7 +239,7 @@ class StatusLineContext:
             return cached, reason
         return None, reason
 
-    def update_velocity(  # pragma: no cover
+    def update_velocity(
         self, session_id: str, total_tokens: int, total_cost: float
     ) -> tuple[int, float, float, float]:
         """Update EMA state and return (tok_delta, tok_ema, cost_delta, cost_ema)."""
@@ -308,34 +310,287 @@ class StatusLineContext:
 
         return tok_delta, tok_ema, cost_delta, cost_ema
 
+    def run(self) -> None:
+        """Execute the status line rendering pipeline."""
+        try:
+            data = json.loads(self.input_text)
+        except json.JSONDecodeError:
+            return
+
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.init_logging()
+
+        config = self.load_config()
+
+        # --- Extract fields ---
+        model = (data.get("model") or {}).get("display_name", "Unknown")
+        session_id = data.get("session_id", "unknown")
+
+        cw = data.get("context_window") or {}
+        used_pct = cw.get("used_percentage")
+        ctx_window_size = cw.get("context_window_size", 200000)
+
+        cost_data = data.get("cost") or {}
+        cost_usd = cost_data.get("total_cost_usd")
+        duration_ms = cost_data.get("total_duration_ms")
+        work_dir = (data.get("workspace") or {}).get("current_dir", "")
+
+        # --- Context percentage ---
+        if used_pct is not None:
+            ctx_pct = used_pct
+            total_ctx = int(used_pct * ctx_window_size / 100) if ctx_window_size else 0
+        else:
+            ctx_pct = None
+            total_ctx = 0
+
+        # --- Per-turn velocity ---
+        total_tokens = cw.get("total_input_tokens", 0) + cw.get(
+            "total_output_tokens", 0
+        )
+        tok_delta, tok_ema, cost_delta, cost_ema = self.update_velocity(
+            session_id, total_tokens, cost_usd or 0.0
+        )
+
+        # --- Usage quota ---
+        usage, usage_reason = self.get_usage()
+
+        # === Build layout ===
+
+        # --- Metrics figures (independent units) ---
+        fig_model = Text()
+        fig_model.append("🔮 ")
+        fig_model.append(model, style="color(255)")
+
+        fig_dir = Text()
+        if work_dir:
+            fig_dir.append("📂 ")
+            fig_dir.append(shorten_dir(work_dir))
+
+        fig_git = Text()
+        git_info = get_git_info(work_dir)
+        if git_info:
+            branch, indicators = git_info
+            fig_git.append("🌿 ")
+            fig_git.append(shorten_branch(branch))
+            fig_git.append(
+                f" {indicators}", style="green" if indicators == "✓" else "yellow"
+            )
+
+        fig_duration = Text()
+        if duration_ms is not None:
+            fig_duration.append("⏱️ ")
+            fig_duration.append(format_duration(duration_ms), style="cyan")
+
+        fig_last = Text()
+        fig_last.append("👈 ")
+        fig_last.append(format_cost(cost_delta))
+
+        fig_avg = Text()
+        fig_avg.append("⚖️ ")
+        fig_avg.append(format_cost(cost_ema))
+        fig_avg.append("/turn", style=DIM)
+
+        fig_total = Text()
+        if cost_usd is not None:
+            fig_total.append("💰 ")
+            fig_total.append(f"${cost_usd:.2f}")
+
+        fig_burn = Text()
+        if cost_usd is not None:
+            if duration_ms is not None and int(duration_ms) // 1000 >= 10:
+                hrs = duration_ms / 3_600_000
+                burn = f"${cost_usd / hrs:.2f}" if hrs > 0 else "--"
+                fig_burn.append("🔥 ")
+                fig_burn.append(burn)
+                fig_burn.append("/hr", style=DIM)
+            elif duration_ms is not None:
+                fig_burn.append("🔥 ")
+                fig_burn.append("--", style=DIM)
+                fig_burn.append("/hr", style=DIM)
+
+        fig_warning = Text()
+        if usage_reason == "no_token":
+            fig_warning.append("⚠️ ")
+            fig_warning.append("no token", style="yellow")
+
+        # --- Flow layout for metrics figures ---
+        sep = Text(" │ ", style=DIM_GRAY)
+        sep_len = sep.cell_len
+
+        # Collect non-empty figures in config-driven order
+        fig_map: dict[str, Text] = {
+            "model": fig_model,
+            "cwd": fig_dir,
+            "git": fig_git,
+            "duration": fig_duration,
+            "total": fig_total,
+            "burn": fig_burn,
+            "last": fig_last,
+            "avg": fig_avg,
+            "warning": fig_warning,
+        }
+        figures: list[Text] = [
+            fig_map[key]
+            for key in config["figures"]
+            if key in fig_map and fig_map[key].cell_len > 0
+        ]
+
+        # --- Build aligned bar rows ---
+        labels = ["ctx", "5h", "7d"]
+        label_width = max(len(l) for l in labels)
+
+        # Prepare suffix Text objects
+        if ctx_pct is not None:
+            ctx_suffix = Text.assemble(
+                (f"{int(round(ctx_pct))}%", pct_style(ctx_pct, 60, 85)),
+                (" (", DIM),
+                format_k(total_ctx),
+                ("/", DIM),
+                format_k(ctx_window_size),
+                (")", DIM),
+            )
+        else:
+            ctx_suffix = Text()
+
+        # 5h usage
+        usage_5h_pct: float | None = None
+        usage_5h_suffix = Text()
+        usage_5h_target: float | None = None
+        if usage and "five_hour" in usage:
+            fh = usage["five_hour"]
+            usage_5h_pct = fh.get("utilization", 0)
+            resets_5h = fh.get("resets_at", "")
+            usage_5h_target = pacing_target(resets_5h, 5 * 3600, self.now)
+            usage_5h_ttl = time_until_reset(resets_5h, self.now)
+            usage_5h_suffix = Text()
+            usage_5h_suffix.append(
+                f"{int(round(usage_5h_pct))}%", style=pct_style(usage_5h_pct)
+            )
+            if usage_5h_ttl:
+                usage_5h_suffix.append(" ⏳ ", style=DIM)
+                usage_5h_suffix.append(usage_5h_ttl)
+
+        # 7d usage
+        usage_7d_pct: float | None = None
+        usage_7d_suffix = Text()
+        usage_7d_target: float | None = None
+        if usage and "seven_day" in usage:
+            sd = usage["seven_day"]
+            usage_7d_pct = sd.get("utilization", 0)
+            resets_7d = sd.get("resets_at", "")
+            usage_7d_target = pacing_target(resets_7d, 7 * 24 * 3600, self.now)
+            usage_7d_ttl = time_until_reset(resets_7d, self.now)
+            usage_7d_suffix = Text()
+            usage_7d_suffix.append(
+                f"{int(round(usage_7d_pct))}%", style=pct_style(usage_7d_pct)
+            )
+            if usage_7d_ttl:
+                usage_7d_suffix.append(" ⏳ ", style=DIM)
+                usage_7d_suffix.append(usage_7d_ttl)
+
+        # --- Usage bar labels (shown when no data) ---
+        usage_labels: dict[str | None, str] = {
+            "no_token": "no token",
+            "api_err": "api error",
+            "bad_response": "bad response",
+            "loading": "loading\u2026",
+        }
+        usage_bar_label = usage_labels.get(usage_reason, "no data")
+
+        suffix_width = max(
+            ctx_suffix.cell_len, usage_5h_suffix.cell_len, usage_7d_suffix.cell_len
+        )
+        # Layout: "label bar suffix"
+        min_bar_width = config["min_bar_width"]
+        max_bar_nudge = 20  # max extra chars we'll add to bars for better flow
+
+        # Find smallest bar width that minimises line count
+        bar_fixed = label_width + 1 + 1 + suffix_width
+        base_width = bar_fixed + min_bar_width
+        best_lines = count_flow_lines(figures, base_width, sep_len)
+        bar_width = min_bar_width
+        for nudge in range(1, max_bar_nudge + 1):
+            candidate = base_width + nudge
+            n = count_flow_lines(figures, candidate, sep_len)
+            if n < best_lines:
+                bar_width = min_bar_width + nudge
+                best_lines = n
+                break  # take the first improvement
+        bar_content_width = bar_fixed + bar_width
+
+        # Apply max_width override: expand bar to fill, or cap at max
+        if config["max_width"] is not None:
+            target_width = max(config["max_width"], bar_content_width)
+            extra = target_width - bar_content_width
+            if extra > 0:
+                bar_width += extra
+                bar_content_width = target_width
+
+        def make_bar_row(
+            label: str,
+            pct: float | None,
+            suffix: Text,
+            target_pct: float | None = None,
+            green: int = 50,
+            yellow: int = 80,
+            bar_label: str = "no data",
+        ) -> Text:
+            row = Text()
+            row.append(label.rjust(label_width), style=DIM)
+            row.append(" ")
+            if pct is None:
+                row.append(bar_label, style=DIM_GRAY)
+                row.append(" " * (bar_width - len(bar_label)))
+            else:
+                row.append_text(build_bar(pct, bar_width, target_pct, green, yellow))
+            row.append(" ")
+            row.append_text(suffix)
+            pad = suffix_width - suffix.cell_len
+            if pad > 0:
+                row.append(" " * pad)
+            return row
+
+        ctx_row = make_bar_row("ctx", ctx_pct, ctx_suffix, green=60, yellow=85)
+        usage_5h_row = make_bar_row(
+            "5h",
+            usage_5h_pct,
+            usage_5h_suffix,
+            usage_5h_target,
+            bar_label=usage_bar_label,
+        )
+        usage_7d_row = make_bar_row(
+            "7d",
+            usage_7d_pct,
+            usage_7d_suffix,
+            usage_7d_target,
+            bar_label=usage_bar_label,
+        )
+
+        # --- Render: flow metrics, divider, bars ---
+        render_width = bar_content_width
+        metrics_lines = flow_figures(figures, render_width, sep, sep_len)
+
+        bars_table = Table(show_header=False, box=None, padding=(0, 0))
+        bars_table.add_column(no_wrap=True)
+        bars_table.add_row(ctx_row)
+        bars_table.add_row(usage_5h_row)
+        bars_table.add_row(usage_7d_row)
+
+        divider = Text("─" * render_width, style=BORDER_STYLE)
+        self.console.width = render_width
+        for line in metrics_lines:
+            self.console.print(line)
+        self.console.print(divider)
+        if fig_warning.cell_len > 0:
+            self.console.print(bars_table)
+            self.console.print(divider)
+            self.console.print(fig_warning, end="")
+        else:
+            self.console.print(bars_table, end="")
+
 
 DEFAULT_FIGURES = ["model", "cwd", "git", "duration", "total", "burn", "last", "avg"]
 DEFAULT_MIN_BAR_WIDTH = 30
-STATE_DIR = Path.home() / ".claude" / "statusline"
-CONFIG_PATH = STATE_DIR / "config.json"
-
-
-def load_config() -> dict:
-    """Load user config from ~/.claude/statusline/config.json, with defaults."""
-    config: dict = {
-        "figures": list(DEFAULT_FIGURES),
-        "min_bar_width": DEFAULT_MIN_BAR_WIDTH,
-        "max_width": None,
-    }
-    try:
-        raw = CONFIG_PATH.read_text()
-        user = json.loads(raw)
-    except (OSError, json.JSONDecodeError):
-        return config
-    if "figures" in user and isinstance(user["figures"], list):
-        config["figures"] = [f for f in user["figures"] if isinstance(f, str)]
-    if "min_bar_width" in user and isinstance(user["min_bar_width"], int):
-        config["min_bar_width"] = max(10, user["min_bar_width"])
-    if "max_width" in user and (
-        isinstance(user["max_width"], int) or user["max_width"] is None
-    ):
-        config["max_width"] = user["max_width"]
-    return config
 
 
 def pct_style(pct: float, green: int = 50, yellow: int = 80) -> str:
@@ -437,8 +692,9 @@ def build_bar(
 # ---------------------------------------------------------------------------
 
 
-def shorten_dir(path: str, max_len: int = 30) -> str:
-    home = str(Path.home())
+def shorten_dir(path: str, max_len: int = 30, home: str | None = None) -> str:
+    if home is None:
+        home = str(Path.home())
     if path.startswith(home):
         path = "~" + path[len(home) :]
     if path.startswith("~/"):
@@ -535,237 +791,21 @@ def get_git_info(work_dir: str | None) -> tuple[str, str] | None:
 # ---------------------------------------------------------------------------
 
 EMA_ALPHA = 2 / 9  # N=8 turns
-
-
-def update_velocity(
-    session_id: str, total_tokens: int, total_cost: float
-) -> tuple[int, float, float, float]:
-    """Update EMA state and return (tok_delta, tok_ema, cost_delta, cost_ema)."""
-    state_file = STATE_DIR / f"state-{session_id}.json"
-
-    prev_tokens = 0
-    prev_tok_ema = 0.0
-    prev_cost = 0.0
-    prev_cost_ema = 0.0
-    turn = 0
-
-    try:
-        state = json.loads(state_file.read_text())
-        prev_tokens = state.get("total_tokens", 0)
-        prev_tok_ema = state.get("ema", 0.0)
-        prev_cost = state.get("total_cost", 0.0)
-        prev_cost_ema = state.get("cost_ema", 0.0)
-        turn = state.get("turn", 0)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
-
-    tok_delta = total_tokens - prev_tokens
-    cost_delta = total_cost - prev_cost
-
-    # Only count as a new turn when data actually changed — the statusline
-    # is rendered many times per real user turn, so most calls see no delta.
-    if tok_delta == 0 and cost_delta < 0.0001:
-        return tok_delta, prev_tok_ema, cost_delta, prev_cost_ema
-
-    turn += 1
-    tok_ema = (
-        float(tok_delta)
-        if turn <= 1
-        else EMA_ALPHA * tok_delta + (1 - EMA_ALPHA) * prev_tok_ema
-    )
-    cost_ema = (
-        cost_delta
-        if turn <= 1
-        else EMA_ALPHA * cost_delta + (1 - EMA_ALPHA) * prev_cost_ema
-    )
-
-    try:
-        state_file.write_text(
-            json.dumps(
-                {
-                    "turn": turn,
-                    "total_tokens": total_tokens,
-                    "ema": round(tok_ema, 1),
-                    "total_cost": round(total_cost, 6),
-                    "cost_ema": round(cost_ema, 6),
-                }
-            )
-            + "\n"
-        )
-    except OSError:  # pragma: no cover
-        pass
-
-    if turn == 1:
-        try:
-            cutoff = time.time() - 86400
-            for f in STATE_DIR.glob("state-*.json"):
-                if f != state_file:
-                    try:
-                        if f.stat().st_mtime < cutoff:
-                            f.unlink(missing_ok=True)
-                    except OSError:  # pragma: no cover
-                        pass
-        except OSError:  # pragma: no cover
-            pass
-
-    return tok_delta, tok_ema, cost_delta, cost_ema
-
-
-# ---------------------------------------------------------------------------
-# Usage quota (Anthropic OAuth API)
-# ---------------------------------------------------------------------------
-
-USAGE_CACHE = STATE_DIR / "usage.json"
 USAGE_CACHE_AGE = 180  # seconds
-
-DEBUG_LOG = STATE_DIR / "debug.log"
-_log = logging.getLogger("statusline")
-_log.setLevel(logging.DEBUG)
-
-
-def _init_logging() -> None:
-    """Attach the rotating file handler to the module logger.
-
-    Called once from main().  Separated so that test imports don't
-    create the real log file — tests can add their own handler if
-    they need to verify log output.
-    """
-    if _log.handlers:
-        return  # already initialised (or test-injected)
-    try:
-        handler = logging.handlers.RotatingFileHandler(
-            DEBUG_LOG, maxBytes=100_000, backupCount=1
-        )
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s [%(process)d] %(message)s", datefmt="%H:%M:%S"
-            )
-        )
-        _log.addHandler(handler)
-    except OSError:  # pragma: no cover
-        pass
-
-
-def _warn(msg: str) -> None:
-    """Print a diagnostic message to stderr."""
-    print(f"statusline: {msg}", file=sys.stderr)
-    _log.warning(msg)
 
 
 def get_oauth_token(creds_path: Path | None = None) -> str | None:
-    """Read OAuth access token from ~/.claude/.credentials.json."""
+    """Read OAuth access token from credentials file.
+
+    Reads from *creds_path* when given, otherwise from
+    ``~/.claude/.credentials.json``.
+    """
     creds_file = creds_path or Path.home() / ".claude" / ".credentials.json"
     try:
         creds = json.loads(creds_file.read_text())
         return creds.get("claudeAiOauth", {}).get("accessToken")
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-
-
-def _touch_cache() -> None:
-    """Update cache mtime to prevent immediate retry after a failed fetch."""
-    try:
-        USAGE_CACHE.touch(exist_ok=True)
-    except OSError:  # pragma: no cover
-        pass
-
-
-def fetch_usage() -> tuple[dict | None, str | None]:
-    """Fetch usage from Anthropic API and cache it.
-
-    Returns (data, reason) where reason is a failure code or None on success.
-    """
-    token = get_oauth_token()
-    if not token:
-        _log.debug("fetch_usage: no OAuth token in ~/.claude/.credentials.json")
-        _touch_cache()
-        return None, "no_token"
-
-    t0 = time.monotonic()
-    try:
-        req = urllib.request.Request(
-            "https://api.anthropic.com/api/oauth/usage",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "anthropic-beta": "oauth-2025-04-20",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
-        _warn(f"usage API request failed: {exc}")
-        _log.debug(
-            "fetch_usage: %s: %s (%.3fs)",
-            type(exc).__name__,
-            exc,
-            time.monotonic() - t0,
-        )
-        _touch_cache()
-        return None, "api_err"
-
-    if "five_hour" not in data or "seven_day" not in data:
-        _warn("usage API response missing expected keys")
-        _log.debug("fetch_usage: bad response, keys=%s", list(data.keys()))
-        _touch_cache()
-        return None, "bad_response"
-
-    _log.debug("fetch_usage: ok (%.3fs)", time.monotonic() - t0)
-    try:
-        tmp = USAGE_CACHE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(USAGE_CACHE)  # atomic on POSIX
-    except OSError:  # pragma: no cover
-        pass
-
-    return data, None
-
-
-def _read_cache() -> dict | None:
-    """Read and parse the cache file. Returns None for missing/invalid data."""
-    try:
-        data = json.loads(USAGE_CACHE.read_text())
-        if "five_hour" in data and "seven_day" in data:
-            return data
-    except (json.JSONDecodeError, FileNotFoundError, OSError):
-        pass
-    return None
-
-
-def _cache_is_fresh(now: float) -> bool:
-    """Check if the cache file exists with an mtime within the TTL."""
-    try:
-        return (now - USAGE_CACHE.stat().st_mtime) <= USAGE_CACHE_AGE
-    except OSError:  # pragma: no cover
-        return False
-
-
-def get_usage(now: float) -> tuple[dict | None, str | None]:
-    """Return cached usage data, refreshing if stale.
-
-    Returns (data, reason) where reason is a failure code or None on success.
-
-    On first run (no cache file), creates a placeholder and fetches
-    immediately.  The placeholder's fresh mtime prevents concurrent
-    instances from also fetching.  Every failure path touches the cache
-    mtime, bounding retries to once per TTL regardless of outcome.
-    """
-    first_run = not USAGE_CACHE.exists()
-    if first_run:
-        _log.debug("get_usage: first_run, creating placeholder")
-        _touch_cache()
-
-    if not first_run and _cache_is_fresh(now):
-        cached = _read_cache()
-        return cached, (None if cached else "loading")
-
-    data, reason = fetch_usage()
-    if data:
-        return data, None
-    _log.debug("get_usage: fetch failed (%s), falling back to cache", reason)
-    cached = _read_cache()
-    if cached:
-        return cached, reason  # stale cache is usable, but propagate failure reason
-    return None, reason
 
 
 def _reset_epoch(resets_at: str) -> float | None:
@@ -852,285 +892,12 @@ def count_flow_lines(figs: list[Text], max_width: int, sep_len: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     raw = sys.stdin.read().strip()
     if not raw:
         return
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return
-
-    now = time.time()
-    config = load_config()
-
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    _init_logging()
-
-    # --- Extract fields ---
-    model = (data.get("model") or {}).get("display_name", "Unknown")
-    session_id = data.get("session_id", "unknown")
-
-    cw = data.get("context_window") or {}
-    used_pct = cw.get("used_percentage")
-    ctx_window_size = cw.get("context_window_size", 200000)
-
-    cost_data = data.get("cost") or {}
-    cost_usd = cost_data.get("total_cost_usd")
-    duration_ms = cost_data.get("total_duration_ms")
-    work_dir = (data.get("workspace") or {}).get("current_dir", "")
-
-    # --- Context percentage ---
-    if used_pct is not None:
-        ctx_pct = used_pct
-        total_ctx = int(used_pct * ctx_window_size / 100) if ctx_window_size else 0
-    else:
-        ctx_pct = None
-        total_ctx = 0
-
-    # --- Per-turn velocity ---
-    total_tokens = cw.get("total_input_tokens", 0) + cw.get("total_output_tokens", 0)
-    tok_delta, tok_ema, cost_delta, cost_ema = update_velocity(
-        session_id, total_tokens, cost_usd or 0.0
-    )
-
-    # --- Usage quota ---
-    usage, usage_reason = get_usage(now)
-
-    # === Build layout ===
-
-    # --- Metrics figures (independent units) ---
-    fig_model = Text()
-    fig_model.append("🔮 ")
-    fig_model.append(model, style="color(255)")
-
-    fig_dir = Text()
-    if work_dir:
-        fig_dir.append("📂 ")
-        fig_dir.append(shorten_dir(work_dir))
-
-    fig_git = Text()
-    git_info = get_git_info(work_dir)
-    if git_info:
-        branch, indicators = git_info
-        fig_git.append("🌿 ")
-        fig_git.append(shorten_branch(branch))
-        fig_git.append(
-            f" {indicators}", style="green" if indicators == "✓" else "yellow"
-        )
-
-    fig_duration = Text()
-    if duration_ms is not None:
-        fig_duration.append("⏱️ ")
-        fig_duration.append(format_duration(duration_ms), style="cyan")
-
-    fig_last = Text()
-    fig_last.append("👈 ")
-    fig_last.append(format_cost(cost_delta))
-
-    fig_avg = Text()
-    fig_avg.append("⚖️ ")
-    fig_avg.append(format_cost(cost_ema))
-    fig_avg.append("/turn", style=DIM)
-
-    fig_total = Text()
-    if cost_usd is not None:
-        fig_total.append("💰 ")
-        fig_total.append(f"${cost_usd:.2f}")
-
-    fig_burn = Text()
-    if cost_usd is not None:
-        if duration_ms is not None and int(duration_ms) // 1000 >= 10:
-            hrs = duration_ms / 3_600_000
-            burn = f"${cost_usd / hrs:.2f}" if hrs > 0 else "--"
-            fig_burn.append("🔥 ")
-            fig_burn.append(burn)
-            fig_burn.append("/hr", style=DIM)
-        elif duration_ms is not None:
-            fig_burn.append("🔥 ")
-            fig_burn.append("--", style=DIM)
-            fig_burn.append("/hr", style=DIM)
-
-    fig_warning = Text()
-    if usage_reason == "no_token":
-        fig_warning.append("⚠️ ")
-        fig_warning.append("no token", style="yellow")
-
-    # --- Flow layout for metrics figures ---
-    sep = Text(" │ ", style=DIM_GRAY)
-    sep_len = sep.cell_len
-
-    # Collect non-empty figures in config-driven order
-    fig_map: dict[str, Text] = {
-        "model": fig_model,
-        "cwd": fig_dir,
-        "git": fig_git,
-        "duration": fig_duration,
-        "total": fig_total,
-        "burn": fig_burn,
-        "last": fig_last,
-        "avg": fig_avg,
-        "warning": fig_warning,
-    }
-    figures: list[Text] = [
-        fig_map[key]
-        for key in config["figures"]
-        if key in fig_map and fig_map[key].cell_len > 0
-    ]
-
-    # --- Build aligned bar rows ---
-    labels = ["ctx", "5h", "7d"]
-    label_width = max(len(l) for l in labels)
-
-    # Prepare suffix Text objects
-    if ctx_pct is not None:
-        ctx_suffix = Text.assemble(
-            (f"{int(round(ctx_pct))}%", pct_style(ctx_pct, 60, 85)),
-            (" (", DIM),
-            format_k(total_ctx),
-            ("/", DIM),
-            format_k(ctx_window_size),
-            (")", DIM),
-        )
-    else:
-        ctx_suffix = Text()
-
-    # 5h usage
-    usage_5h_pct: float | None = None
-    usage_5h_suffix = Text()
-    usage_5h_target: float | None = None
-    if usage and "five_hour" in usage:
-        fh = usage["five_hour"]
-        usage_5h_pct = fh.get("utilization", 0)
-        resets_5h = fh.get("resets_at", "")
-        usage_5h_target = pacing_target(resets_5h, 5 * 3600, now)
-        usage_5h_ttl = time_until_reset(resets_5h, now)
-        usage_5h_suffix = Text()
-        usage_5h_suffix.append(
-            f"{int(round(usage_5h_pct))}%", style=pct_style(usage_5h_pct)
-        )
-        if usage_5h_ttl:
-            usage_5h_suffix.append(" ⏳ ", style=DIM)
-            usage_5h_suffix.append(usage_5h_ttl)
-
-    # 7d usage
-    usage_7d_pct: float | None = None
-    usage_7d_suffix = Text()
-    usage_7d_target: float | None = None
-    if usage and "seven_day" in usage:
-        sd = usage["seven_day"]
-        usage_7d_pct = sd.get("utilization", 0)
-        resets_7d = sd.get("resets_at", "")
-        usage_7d_target = pacing_target(resets_7d, 7 * 24 * 3600, now)
-        usage_7d_ttl = time_until_reset(resets_7d, now)
-        usage_7d_suffix = Text()
-        usage_7d_suffix.append(
-            f"{int(round(usage_7d_pct))}%", style=pct_style(usage_7d_pct)
-        )
-        if usage_7d_ttl:
-            usage_7d_suffix.append(" ⏳ ", style=DIM)
-            usage_7d_suffix.append(usage_7d_ttl)
-
-    # --- Usage bar labels (shown when no data) ---
-    usage_labels: dict[str | None, str] = {
-        "no_token": "no token",
-        "api_err": "api error",
-        "bad_response": "bad response",
-        "loading": "loading\u2026",
-    }
-    usage_bar_label = usage_labels.get(usage_reason, "no data")
-
-    suffix_width = max(
-        ctx_suffix.cell_len, usage_5h_suffix.cell_len, usage_7d_suffix.cell_len
-    )
-    # Layout: "label bar suffix"
-    min_bar_width = config["min_bar_width"]
-    max_bar_nudge = 20  # max extra chars we'll add to bars for better flow
-
-    # Find smallest bar width that minimises line count
-    bar_fixed = label_width + 1 + 1 + suffix_width
-    base_width = bar_fixed + min_bar_width
-    best_lines = count_flow_lines(figures, base_width, sep_len)
-    bar_width = min_bar_width
-    for nudge in range(1, max_bar_nudge + 1):
-        candidate = base_width + nudge
-        n = count_flow_lines(figures, candidate, sep_len)
-        if n < best_lines:
-            bar_width = min_bar_width + nudge
-            best_lines = n
-            break  # take the first improvement
-    bar_content_width = bar_fixed + bar_width
-
-    # Apply max_width override: expand bar to fill, or cap at max
-    if config["max_width"] is not None:
-        target_width = max(config["max_width"], bar_content_width)
-        extra = target_width - bar_content_width
-        if extra > 0:
-            bar_width += extra
-            bar_content_width = target_width
-
-    def make_bar_row(
-        label: str,
-        pct: float | None,
-        suffix: Text,
-        target_pct: float | None = None,
-        green: int = 50,
-        yellow: int = 80,
-        bar_label: str = "no data",
-    ) -> Text:
-        row = Text()
-        row.append(label.rjust(label_width), style=DIM)
-        row.append(" ")
-        if pct is None:
-            row.append(bar_label, style=DIM_GRAY)
-            row.append(" " * (bar_width - len(bar_label)))
-        else:
-            row.append_text(build_bar(pct, bar_width, target_pct, green, yellow))
-        row.append(" ")
-        row.append_text(suffix)
-        pad = suffix_width - suffix.cell_len
-        if pad > 0:
-            row.append(" " * pad)
-        return row
-
-    ctx_row = make_bar_row("ctx", ctx_pct, ctx_suffix, green=60, yellow=85)
-    usage_5h_row = make_bar_row(
-        "5h",
-        usage_5h_pct,
-        usage_5h_suffix,
-        usage_5h_target,
-        bar_label=usage_bar_label,
-    )
-    usage_7d_row = make_bar_row(
-        "7d",
-        usage_7d_pct,
-        usage_7d_suffix,
-        usage_7d_target,
-        bar_label=usage_bar_label,
-    )
-
-    # --- Render: flow metrics, divider, bars ---
-    render_width = bar_content_width
-    metrics_lines = flow_figures(figures, render_width, sep, sep_len)
-
-    bars_table = Table(show_header=False, box=None, padding=(0, 0))
-    bars_table.add_column(no_wrap=True)
-    bars_table.add_row(ctx_row)
-    bars_table.add_row(usage_5h_row)
-    bars_table.add_row(usage_7d_row)
-
-    divider = Text("─" * render_width, style=BORDER_STYLE)
-    console = Console(highlight=False, force_terminal=True, width=render_width)
-    for line in metrics_lines:
-        console.print(line)
-    console.print(divider)
-    if fig_warning.cell_len > 0:
-        console.print(bars_table)
-        console.print(divider)
-        console.print(fig_warning, end="")
-    else:
-        console.print(bars_table, end="")
+    ctx = StatusLineContext.create(raw)
+    ctx.run()
 
 
 if __name__ == "__main__":  # pragma: no cover

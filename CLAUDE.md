@@ -15,17 +15,36 @@ The repo is a single-plugin marketplace:
 
 ### Script (`claude-statusline/statusline-command.py`)
 
-Single-file script with these sections:
-- **Config**: `load_config()` reads `~/.claude/statusline/config.json` for figure selection, bar width, and max width
-- **Styles**: Rich style constants
-- **Formatting helpers**: `format_k`, `format_tok`, `format_ema`, `format_duration`, `format_cost`, `format_time_delta`
-- **Progress bar**: `build_bar()` returns Rich `Text` with color-coded fill and optional pacing marker
-- **Working directory**: `shorten_dir()` truncates long paths; `shorten_branch()` truncates long branch names; `parse_git_status()`/`get_git_info()` show branch and status indicators
-- **Per-turn velocity**: EMA tracking for both tokens and cost, persisted per session in `~/.claude/statusline/state-{session_id}.json`
-- **Usage**: Fetches from Anthropic OAuth API (`/api/oauth/usage`), cached for 180s in `~/.claude/statusline/usage.json`. Returns `(data, reason)` tuples for structured error handling. Provides 5-hour and 7-day rolling window utilization percentages with pacing targets and reset timers.
-- **Logging**: Debug logging via `RotatingFileHandler` to `~/.claude/statusline/debug.log` (100KB max). `_warn()` prints diagnostics to stderr.
-- **Flow layout**: `flow_figures()`/`count_flow_lines()` pack emoji-prefixed metric figures into wrapped lines
-- **Main**: Parses stdin JSON, renders flow-wrapped metric figures (model, cwd, git, duration, cost, burn, last, avg) above a divider, then three bar rows (context, 5h usage, 7d usage)
+Single-file script organized around a `StatusLineContext` dataclass that holds all runtime state and dependencies:
+
+#### `StatusLineContext` (dataclass)
+Holds injected dependencies: `input_text`, `now`, `state_dir`, `config_path`, `usage_cache`, `debug_log`, `logger`, `console`, `fetch`, and `creds_path`. A `create(raw)` class method provides production defaults (real paths, real clock, real HTTP fetcher).
+
+**Methods** (stateful operations that need paths, logger, or config):
+- `load_config()` — reads config JSON, merges with defaults
+- `init_logging()` — attaches `RotatingFileHandler` (idempotent)
+- `warn()` — prints diagnostics to stderr and logs
+- `touch_cache()` — creates empty cache file
+- `fetch_usage()` — HTTP fetch from Anthropic OAuth API
+- `read_cache()` — reads and parses cache JSON
+- `cache_is_fresh()` — checks cache mtime against TTL
+- `get_usage()` — orchestrates cache/fetch, returns `(data, reason)` tuples
+- `update_velocity()` — EMA tracking for tokens and cost, persisted per session
+- `run()` — main render pipeline: parses input, builds figures and bars, prints output
+
+#### Free functions (pure/stateless)
+- **Formatting**: `format_k`, `format_tok`, `format_ema`, `format_duration`, `format_cost`, `format_time_delta`, `pct_style`
+- **Progress bar**: `build_bar()` — Rich `Text` with color-coded fill and optional pacing marker
+- **Path helpers**: `shorten_dir()`, `shorten_branch()`, `parse_git_status()`, `get_git_info()`
+- **Auth**: `get_oauth_token()` — reads OAuth token from credentials file
+- **Usage math**: `_reset_epoch()`, `time_until_reset()`, `pacing_target()`
+- **Flow layout**: `flow_figures()`, `count_flow_lines()`
+
+#### `main()` (thin shell, no-cover)
+Reads stdin, calls `StatusLineContext.create(raw)`, then `ctx.run()`.
+
+#### Dependency injection pattern
+Tests use a `make_ctx` fixture that constructs `StatusLineContext` with tmp_path-based paths, an in-memory `Console`, a no-op HTTP fetcher, and an isolated logger. No mocking or monkeypatching of module globals needed.
 
 ### Layout
 

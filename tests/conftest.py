@@ -1,12 +1,14 @@
 """Shared fixtures for statusline-command tests."""
 
 import importlib.util
+import logging
 import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
-# The script has a hyphenated filename, so we import it via importlib.
 _SCRIPT = (
     Path(__file__).resolve().parent.parent
     / "claude-statusline"
@@ -19,7 +21,6 @@ def mod():
     """Import statusline-command.py as a module."""
     spec = importlib.util.spec_from_file_location("statusline_command", _SCRIPT)
     module = importlib.util.module_from_spec(spec)
-    # Avoid polluting sys.modules across tests
     old = sys.modules.get("statusline_command")
     sys.modules["statusline_command"] = module
     spec.loader.exec_module(module)
@@ -27,26 +28,45 @@ def mod():
     if old is None:
         sys.modules.pop("statusline_command", None)
     else:
-        sys.modules["statusline_command"] = old
+        sys.modules["statusline_command"] = old  # pragma: no cover
+
+
+def _noop_fetch(url: str, headers: dict[str, str], timeout: int) -> bytes:
+    """Default test fetcher that returns empty JSON."""
+    return b"{}"  # pragma: no cover
 
 
 @pytest.fixture()
-def mock_home(tmp_path, monkeypatch):
-    """Redirect Path.home() to a temp directory with .claude/statusline/ created."""
-    claude_dir = tmp_path / ".claude"
-    claude_dir.mkdir()
-    statusline_dir = claude_dir / "statusline"
-    statusline_dir.mkdir()
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-    return tmp_path
+def make_ctx(mod, tmp_path):
+    """Factory fixture that builds a test StatusLineContext.
 
+    All paths point into tmp_path.  Logger has no handlers (messages
+    are silently dropped).  Console writes to an in-memory StringIO.
+    Fetch is a no-op by default.
+    """
 
-@pytest.fixture()
-def mock_time(monkeypatch):
-    """Return a helper that patches time.time() to a fixed value."""
-    import time
+    def _make(
+        input_text: str = "{}",
+        now: float = 1_000_000.0,
+        fetch=_noop_fetch,
+        console: Console | None = None,
+        **overrides,
+    ):
+        state_dir = tmp_path / "statusline"
+        state_dir.mkdir(exist_ok=True)
+        defaults = {
+            "input_text": input_text,
+            "now": now,
+            "state_dir": state_dir,
+            "config_path": tmp_path / "config.json",
+            "usage_cache": tmp_path / "usage.json",
+            "debug_log": tmp_path / "debug.log",
+            "logger": logging.getLogger(f"test-{id(tmp_path)}"),
+            "console": console
+            or Console(file=StringIO(), highlight=False, force_terminal=True),
+            "fetch": fetch,
+        }
+        defaults.update(overrides)
+        return mod.StatusLineContext(**defaults)
 
-    def _set(value: float):
-        monkeypatch.setattr(time, "time", lambda: value)
-
-    return _set
+    return _make

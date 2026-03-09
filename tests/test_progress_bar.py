@@ -59,27 +59,23 @@ class TestBuildBar:
 class TestShortenDir:
     """shorten_dir: path abbreviation."""
 
-    def test_home_replacement(self, mod, mock_home):
-        home = str(mock_home)
-        assert mod.shorten_dir(f"{home}/projects") == "~/projects"
-
-    def test_deep_path_ellipsis(self, mod, mock_home):
-        home = str(mock_home)
-        result = mod.shorten_dir(f"{home}/a/b/c/d")
-        assert result == "~/…/c/d"
-
-    def test_exactly_two_parts(self, mod, mock_home):
-        home = str(mock_home)
-        # Two parts after ~/ → no ellipsis
-        result = mod.shorten_dir(f"{home}/a/b")
-        assert result == "~/a/b"
-
-    def test_one_part(self, mod, mock_home):
-        home = str(mock_home)
-        result = mod.shorten_dir(f"{home}/projects")
+    def test_home_replacement(self, mod):
+        result = mod.shorten_dir("/Users/testuser/projects", home="/Users/testuser")
         assert result == "~/projects"
 
-    def test_max_len_truncation(self, mod, mock_home):
+    def test_deep_path_ellipsis(self, mod):
+        result = mod.shorten_dir("/Users/testuser/a/b/c/d", home="/Users/testuser")
+        assert result == "~/…/c/d"
+
+    def test_exactly_two_parts(self, mod):
+        result = mod.shorten_dir("/Users/testuser/a/b", home="/Users/testuser")
+        assert result == "~/a/b"
+
+    def test_one_part(self, mod):
+        result = mod.shorten_dir("/Users/testuser/projects", home="/Users/testuser")
+        assert result == "~/projects"
+
+    def test_max_len_truncation(self, mod):
         long_path = "/very/long/absolute/path/that/exceeds/limit"
         result = mod.shorten_dir(long_path, max_len=20)
         assert len(result) <= 20
@@ -93,7 +89,8 @@ class TestShortenDir:
         result = mod.shorten_dir("/opt/data/files")
         assert result == "/opt/data/files"
 
-    def test_custom_max_len(self, mod, mock_home):
-        home = str(mock_home)
-        result = mod.shorten_dir(f"{home}/a/b/c/d", max_len=10)
+    def test_custom_max_len(self, mod):
+        result = mod.shorten_dir(
+            "/Users/testuser/a/b/c/d", max_len=10, home="/Users/testuser"
+        )
         assert len(result) <= 10

@@ -1,180 +1,154 @@
 """Tests for Anthropic OAuth usage functions."""
 
 import json
-from unittest.mock import MagicMock, patch
 
 
 class TestGetOauthToken:
-    """get_oauth_token: reading OAuth token from ~/.claude/.credentials.json."""
+    """get_oauth_token: reading OAuth token from credentials file."""
 
-    def test_credentials_file_success(self, mod, mock_home):
-        creds_file = mock_home / ".claude" / ".credentials.json"
-        creds_file.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok-123"}}))
-        assert mod.get_oauth_token() == "tok-123"
+    def test_credentials_file_success(self, mod, tmp_path):
+        creds = tmp_path / "creds.json"
+        creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok-123"}}))
+        assert mod.get_oauth_token(creds_path=creds) == "tok-123"
 
-    def test_credentials_file_missing(self, mod, mock_home):
-        assert mod.get_oauth_token() is None
+    def test_credentials_file_missing(self, mod, tmp_path):
+        assert mod.get_oauth_token(creds_path=tmp_path / "nope.json") is None
 
-    def test_credentials_file_missing_key(self, mod, mock_home):
-        creds_file = mock_home / ".claude" / ".credentials.json"
-        creds_file.write_text(json.dumps({"other": "data"}))
-        assert mod.get_oauth_token() is None
+    def test_credentials_file_missing_key(self, mod, tmp_path):
+        creds = tmp_path / "creds.json"
+        creds.write_text(json.dumps({"other": "data"}))
+        assert mod.get_oauth_token(creds_path=creds) is None
 
-    def test_credentials_file_corrupt(self, mod, mock_home):
-        creds_file = mock_home / ".claude" / ".credentials.json"
-        creds_file.write_text("not json")
-        assert mod.get_oauth_token() is None
+    def test_credentials_file_corrupt(self, mod, tmp_path):
+        creds = tmp_path / "creds.json"
+        creds.write_text("not json")
+        assert mod.get_oauth_token(creds_path=creds) is None
 
 
 class TestFetchUsage:
-    """fetch_usage: HTTP call to Anthropic API with structured error returns."""
+    """fetch_usage: HTTP call via injected fetcher with structured error returns."""
 
-    def test_successful_fetch(self, mod, mock_home, tmp_path, monkeypatch):
+    def _creds(self, tmp_path):
+        """Write a valid credentials file and return its path."""
+        creds = tmp_path / "creds.json"
+        creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok-abc"}}))
+        return creds
+
+    def test_successful_fetch(self, make_ctx, tmp_path):
         usage_data = {
             "five_hour": {"utilization": 30, "resets_at": "2025-01-15T05:00:00+00:00"},
             "seven_day": {"utilization": 50, "resets_at": "2025-01-20T00:00:00+00:00"},
         }
-        response_data = json.dumps(usage_data).encode()
-
-        cache = tmp_path / "usage-cache.json"
-        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
-
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = response_data
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-
-        with (
-            patch.object(mod, "get_oauth_token", return_value="tok-abc"),
-            patch("urllib.request.urlopen", return_value=mock_resp),
-        ):
-            data, reason = mod.fetch_usage()
-
+        ctx = make_ctx(
+            fetch=lambda u, h, t: json.dumps(usage_data).encode(),
+            creds_path=self._creds(tmp_path),
+        )
+        data, reason = ctx.fetch_usage()
         assert data == usage_data
         assert reason is None
-        assert cache.exists()
+        assert ctx.usage_cache.exists()
 
-    def test_no_auth_token(self, mod, mock_home, tmp_path, monkeypatch):
-        cache = tmp_path / "usage-cache.json"
-        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
-
-        with patch.object(mod, "get_oauth_token", return_value=None):
-            data, reason = mod.fetch_usage()
+    def test_no_auth_token(self, make_ctx, tmp_path):
+        ctx = make_ctx(creds_path=tmp_path / "nonexistent.json")
+        data, reason = ctx.fetch_usage()
         assert data is None
         assert reason == "no_token"
-        assert cache.exists()  # touched to prevent immediate retry
+        assert ctx.usage_cache.exists()  # touched to prevent immediate retry
 
-    def test_network_error(self, mod, mock_home, tmp_path, monkeypatch):
-        cache = tmp_path / "usage-cache.json"
-        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
+    def test_network_error(self, make_ctx, tmp_path):
+        def bad_fetch(url, headers, timeout):
+            raise OSError("timeout")
 
-        with (
-            patch.object(mod, "get_oauth_token", return_value="tok-abc"),
-            patch("urllib.request.urlopen", side_effect=OSError("timeout")),
-        ):
-            data, reason = mod.fetch_usage()
+        ctx = make_ctx(fetch=bad_fetch, creds_path=self._creds(tmp_path))
+        data, reason = ctx.fetch_usage()
         assert data is None
         assert reason == "api_err"
-        assert cache.exists()  # touched to prevent immediate retry
+        assert ctx.usage_cache.exists()
 
-    def test_missing_usage_keys(self, mod, mock_home, tmp_path, monkeypatch):
-        cache = tmp_path / "usage-cache.json"
-        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
-
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"other": "data"}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-
-        with (
-            patch.object(mod, "get_oauth_token", return_value="tok-abc"),
-            patch("urllib.request.urlopen", return_value=mock_resp),
-        ):
-            data, reason = mod.fetch_usage()
+    def test_missing_usage_keys(self, make_ctx, tmp_path):
+        ctx = make_ctx(
+            fetch=lambda u, h, t: json.dumps({"other": "data"}).encode(),
+            creds_path=self._creds(tmp_path),
+        )
+        data, reason = ctx.fetch_usage()
         assert data is None
         assert reason == "bad_response"
-        assert cache.exists()  # touched to prevent immediate retry
+        assert ctx.usage_cache.exists()
 
 
 class TestGetUsage:
     """get_usage: caching logic with structured error returns."""
 
-    def _set_cache_path(self, mod, monkeypatch, tmp_path):
-        cache = tmp_path / "usage-cache.json"
-        monkeypatch.setattr(mod, "USAGE_CACHE", cache)
-        return cache
-
-    def test_fresh_cache_hit(self, mod, tmp_path, monkeypatch):
-        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
+    def test_fresh_cache_hit(self, make_ctx, tmp_path):
         usage_data = {
             "five_hour": {"utilization": 30},
             "seven_day": {"utilization": 50},
         }
+        cache = tmp_path / "usage.json"
         cache.write_text(json.dumps(usage_data))
 
-        now = cache.stat().st_mtime + 10  # 10s old, within TTL
-        data, reason = mod.get_usage(now)
+        ctx = make_ctx(now=cache.stat().st_mtime + 10)  # 10s old, within TTL
+        data, reason = ctx.get_usage()
         assert data == usage_data
         assert reason is None
 
-    def test_fresh_cache_empty_returns_loading(self, mod, tmp_path, monkeypatch):
+    def test_fresh_cache_empty_returns_loading(self, make_ctx, tmp_path):
         """Fresh placeholder (empty file) returns loading reason."""
-        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
+        cache = tmp_path / "usage.json"
         cache.touch()  # empty placeholder
 
-        with patch.object(mod, "fetch_usage") as mock_fetch:
-            now = cache.stat().st_mtime + 10  # fresh
-            data, reason = mod.get_usage(now)
+        ctx = make_ctx(now=cache.stat().st_mtime + 10)  # fresh
+        data, reason = ctx.get_usage()
         assert data is None
         assert reason == "loading"
-        mock_fetch.assert_not_called()
 
-    def test_stale_cache_fallback(self, mod, tmp_path, monkeypatch, mock_home):
-        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
+    def test_stale_cache_fallback(self, make_ctx, tmp_path):
         old_data = {"five_hour": {"utilization": 20}, "seven_day": {"utilization": 40}}
+        cache = tmp_path / "usage.json"
         cache.write_text(json.dumps(old_data))
 
-        # No auth → fetch returns (None, "no_token") → falls back to stale cache
-        with patch.object(mod, "get_oauth_token", return_value=None):
-            now = cache.stat().st_mtime + 300  # 300s old, stale
-            data, reason = mod.get_usage(now)
+        # No auth -> fetch returns (None, "no_token") -> falls back to stale cache
+        ctx = make_ctx(
+            now=cache.stat().st_mtime + 300,  # stale
+            creds_path=tmp_path / "nonexistent.json",
+        )
+        data, reason = ctx.get_usage()
         assert data == old_data
-        assert reason == "no_token"  # propagates the fetch failure reason
+        assert reason == "no_token"
 
-    def test_no_cache_first_run(self, mod, tmp_path, monkeypatch, mock_home):
+    def test_no_cache_first_run(self, make_ctx, tmp_path):
         """First run: no cache. Creates placeholder, fetches, returns None."""
-        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
+        # Remove the default usage.json that make_ctx doesn't create
+        cache = tmp_path / "usage.json"
         assert not cache.exists()
 
-        with patch.object(mod, "get_oauth_token", return_value=None):
-            data, reason = mod.get_usage(1000000.0)
+        ctx = make_ctx(creds_path=tmp_path / "nonexistent.json")
+        data, reason = ctx.get_usage()
         assert data is None
         assert reason == "no_token"
         assert cache.exists()  # placeholder created
 
-    def test_first_run_fetch_succeeds(self, mod, tmp_path, monkeypatch, mock_home):
+    def test_first_run_fetch_succeeds(self, make_ctx, tmp_path):
         """First run: no cache file. Fetches and returns data."""
-        self._set_cache_path(mod, monkeypatch, tmp_path)
         new_data = {
             "five_hour": {"utilization": 50, "resets_at": "2025-01-15T05:00:00+00:00"},
             "seven_day": {"utilization": 70, "resets_at": "2025-01-20T00:00:00+00:00"},
         }
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(new_data).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        ctx = make_ctx(
+            fetch=lambda u, h, t: json.dumps(new_data).encode(),
+            creds_path=tmp_path / "creds.json",
+        )
+        # Need a valid creds file for the fetch to proceed
+        creds = tmp_path / "creds.json"
+        creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok-abc"}}))
 
-        with (
-            patch.object(mod, "get_oauth_token", return_value="tok-abc"),
-            patch("urllib.request.urlopen", return_value=mock_resp),
-        ):
-            data, reason = mod.get_usage(1000000.0)
+        data, reason = ctx.get_usage()
         assert data == new_data
         assert reason is None
 
-    def test_stale_cache_refreshes(self, mod, tmp_path, monkeypatch, mock_home):
+    def test_stale_cache_refreshes(self, make_ctx, tmp_path):
         """When cache is stale, fetch new data."""
-        cache = self._set_cache_path(mod, monkeypatch, tmp_path)
+        cache = tmp_path / "usage.json"
         old_data = {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 20}}
         cache.write_text(json.dumps(old_data))
 
@@ -182,17 +156,15 @@ class TestGetUsage:
             "five_hour": {"utilization": 50, "resets_at": "2025-01-15T05:00:00+00:00"},
             "seven_day": {"utilization": 70, "resets_at": "2025-01-20T00:00:00+00:00"},
         }
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(new_data).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        creds = tmp_path / "creds.json"
+        creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok-abc"}}))
 
-        with (
-            patch.object(mod, "get_oauth_token", return_value="tok-abc"),
-            patch("urllib.request.urlopen", return_value=mock_resp),
-        ):
-            now = cache.stat().st_mtime + 300  # stale
-            data, reason = mod.get_usage(now)
+        ctx = make_ctx(
+            now=cache.stat().st_mtime + 300,  # stale
+            fetch=lambda u, h, t: json.dumps(new_data).encode(),
+            creds_path=creds,
+        )
+        data, reason = ctx.get_usage()
         assert data == new_data
         assert reason is None
 
