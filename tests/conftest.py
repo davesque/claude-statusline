@@ -59,7 +59,7 @@ def make_ctx(mod, tmp_path):
             "now": now,
             "state_dir": state_dir,
             "config_path": tmp_path / "config.json",
-            "usage_cache": tmp_path / "usage.json",
+            "usage_cache": mod.UsageCache(tmp_path / "usage.json"),
             "debug_log": tmp_path / "debug.log",
             "logger": logging.getLogger(f"test-{id(tmp_path)}"),
             "console": console

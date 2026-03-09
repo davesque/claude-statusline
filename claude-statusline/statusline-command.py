@@ -227,7 +227,6 @@ class StatusLineContext:
             json.JSONDecodeError,
             ValueError,
         ) as exc:
-            self._warn(f"usage API request failed: {exc}")
             self.logger.debug(
                 "fetch_usage: %s: %s (%.3fs)",
                 type(exc).__name__,
