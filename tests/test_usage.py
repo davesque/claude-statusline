@@ -4,6 +4,8 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 
 class TestGetOauthToken:
     """get_oauth_token: reading OAuth token from credentials file."""
@@ -113,7 +115,7 @@ class TestGetOauthTokenKeychainFallback:
 
 
 class TestFetchUsage:
-    """fetch_usage: HTTP call via injected fetcher with structured error returns."""
+    """fetch_usage: HTTP call via injected fetcher, raises FetchError on failure."""
 
     def _creds(self, tmp_path):
         """Write a valid credentials file and return its path."""
@@ -121,7 +123,7 @@ class TestFetchUsage:
         creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok-abc"}}))
         return creds
 
-    def test_successful_fetch(self, make_ctx, tmp_path):
+    def test_successful_fetch(self, mod, make_ctx, tmp_path):
         usage_data = {
             "five_hour": {"utilization": 30, "resets_at": "2025-01-15T05:00:00+00:00"},
             "seven_day": {"utilization": 50, "resets_at": "2025-01-20T00:00:00+00:00"},
@@ -130,33 +132,31 @@ class TestFetchUsage:
             fetch=lambda u, h, t: json.dumps(usage_data).encode(),
             creds_path=self._creds(tmp_path),
         )
-        data, reason = ctx.fetch_usage()
-        assert data == usage_data
-        assert reason is None
+        assert ctx.fetch_usage() == usage_data
 
-    def test_no_auth_token(self, make_ctx, tmp_path):
+    def test_no_auth_token(self, mod, make_ctx, tmp_path):
         ctx = make_ctx(creds_path=tmp_path / "nonexistent.json")
-        data, reason = ctx.fetch_usage()
-        assert data is None
-        assert reason == "no_token"
+        with pytest.raises(mod.FetchError, match="no OAuth token") as exc_info:
+            ctx.fetch_usage()
+        assert exc_info.value.reason == "no_token"
 
-    def test_network_error(self, make_ctx, tmp_path):
+    def test_network_error(self, mod, make_ctx, tmp_path):
         def bad_fetch(url, headers, timeout):
             raise OSError("timeout")
 
         ctx = make_ctx(fetch=bad_fetch, creds_path=self._creds(tmp_path))
-        data, reason = ctx.fetch_usage()
-        assert data is None
-        assert reason == "api_err"
+        with pytest.raises(mod.FetchError) as exc_info:
+            ctx.fetch_usage()
+        assert exc_info.value.reason == "api_err"
 
-    def test_missing_usage_keys(self, make_ctx, tmp_path):
+    def test_missing_usage_keys(self, mod, make_ctx, tmp_path):
         ctx = make_ctx(
             fetch=lambda u, h, t: json.dumps({"other": "data"}).encode(),
             creds_path=self._creds(tmp_path),
         )
-        data, reason = ctx.fetch_usage()
-        assert data is None
-        assert reason == "bad_response"
+        with pytest.raises(mod.FetchError) as exc_info:
+            ctx.fetch_usage()
+        assert exc_info.value.reason == "bad_response"
 
 
 class TestGetUsage:

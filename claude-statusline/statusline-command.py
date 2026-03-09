@@ -44,6 +44,16 @@ BAR_RED = "color(131)"
 HOT_PINK = "color(199)"
 
 
+class FetchError(Exception):
+    """Raised when usage data cannot be fetched from the API."""
+
+    reason: str
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 def _default_fetch(
     url: str, headers: dict[str, str], timeout: int
 ) -> bytes:  # pragma: no cover
@@ -167,18 +177,18 @@ class StatusLineContext:
         except OSError:  # pragma: no cover
             pass
 
-    def fetch_usage(self) -> tuple[dict | None, str | None]:
+    def fetch_usage(self) -> dict:
         """Fetch usage data from the Anthropic API.
 
-        Returns (data, None) on success, or (None, reason) on failure.
-        Does not manage the cache — callers are responsible for that.
+        Returns parsed usage data on success.
+        Raises FetchError on failure.  Does not manage the cache.
         """
         token = get_oauth_token(self.creds_path)
         if not token:
             self.logger.debug(
                 "fetch_usage: no OAuth token (file and keychain)"
             )
-            return None, "no_token"
+            raise FetchError("no_token", "no OAuth token (file and keychain)")
 
         t0 = time.monotonic()
         try:
@@ -204,15 +214,15 @@ class StatusLineContext:
                 exc,
                 time.monotonic() - t0,
             )
-            return None, "api_err"
+            raise FetchError("api_err", str(exc)) from exc
 
         if "five_hour" not in data or "seven_day" not in data:
             self._warn("usage API response missing expected keys")
             self.logger.debug("fetch_usage: bad response, keys=%s", list(data.keys()))
-            return None, "bad_response"
+            raise FetchError("bad_response", "missing expected keys")
 
         self.logger.debug("fetch_usage: ok (%.3fs)", time.monotonic() - t0)
-        return data, None
+        return data
 
     def _write_cache(self, data: dict) -> None:
         """Atomically write data to the usage cache file."""
@@ -241,19 +251,22 @@ class StatusLineContext:
         )
         self._touch_cache()
 
-        data, reason = self.fetch_usage()
-        if data:
-            self._write_cache(data)
-            return data, None
+        try:
+            data = self.fetch_usage()
+        except FetchError as exc:
+            self.logger.debug(
+                "get_usage: fetch failed (%s), falling back to cache", exc.reason
+            )
+            # Restore old mtime so the next invocation retries promptly.
+            if old_mtime is not None:
+                os.utime(self.usage_cache, (old_mtime, old_mtime))
+            cached = self._read_cache()
+            if cached:
+                return cached, exc.reason
+            return None, exc.reason
 
-        self.logger.debug("get_usage: fetch failed (%s), falling back to cache", reason)
-        # Restore old mtime so the next invocation retries promptly.
-        if old_mtime is not None:
-            os.utime(self.usage_cache, (old_mtime, old_mtime))
-        cached = self._read_cache()
-        if cached:
-            return cached, reason
-        return None, reason
+        self._write_cache(data)
+        return data, None
 
     def update_velocity(
         self, session_id: str, total_tokens: int, total_cost: float
