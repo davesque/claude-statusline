@@ -247,33 +247,27 @@ class StatusLineContext:
 
     def get_usage(self) -> tuple[dict | None, str | None]:
         """Return cached usage data, refreshing if stale."""
-        cache = self.usage_cache
-        first_run = not cache.exists()
+        first_run = not self.usage_cache.exists()
         if first_run:
             self.logger.debug("get_usage: first_run, creating placeholder")
-            cache.touch()
 
-        if not first_run and cache.is_fresh(self.now):
-            cached = cache.read()
+        if not first_run and self.usage_cache.is_fresh(self.now):
+            cached = self.usage_cache.read()
             return cached, (None if cached else "loading")
 
         # Touch before fetching so concurrent sessions see a fresh mtime
         # and don't redundantly hit the API.  On failure the touched mtime
         # stays, naturally rate-limiting retries to once per TTL.
-        cache.touch()
-
+        self.usage_cache.touch()
         try:
             data = self.fetch_usage()
         except FetchError as exc:
             self.logger.debug(
                 "get_usage: fetch failed (%s), falling back to cache", exc.reason
             )
-            cached = cache.read()
-            if cached:
-                return cached, exc.reason
-            return None, exc.reason
+            return self.usage_cache.read(), exc.reason
 
-        cache.write(data)
+        self.usage_cache.write(data)
         return data, None
 
     def update_velocity(
