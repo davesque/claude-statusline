@@ -159,6 +159,65 @@ class TestFetchUsage:
         assert exc_info.value.reason == "bad_response"
 
 
+class TestUsageCache:
+    """UsageCache: file-level cache operations."""
+
+    VALID_DATA = {"five_hour": {"utilization": 30}, "seven_day": {"utilization": 50}}
+
+    def test_exists_false(self, mod, tmp_path):
+        cache = mod.UsageCache(tmp_path / "missing.json")
+        assert not cache.exists()
+
+    def test_exists_true(self, mod, tmp_path):
+        path = tmp_path / "usage.json"
+        path.touch()
+        assert mod.UsageCache(path).exists()
+
+    def test_touch_creates_file(self, mod, tmp_path):
+        cache = mod.UsageCache(tmp_path / "usage.json")
+        assert not cache.path.exists()
+        cache.touch()
+        assert cache.path.exists()
+
+    def test_write_and_read(self, mod, tmp_path):
+        cache = mod.UsageCache(tmp_path / "usage.json")
+        cache.write(self.VALID_DATA)
+        assert cache.read() == self.VALID_DATA
+
+    def test_read_missing_file(self, mod, tmp_path):
+        cache = mod.UsageCache(tmp_path / "missing.json")
+        assert cache.read() is None
+
+    def test_read_invalid_json(self, mod, tmp_path):
+        path = tmp_path / "usage.json"
+        path.write_text("not json")
+        assert mod.UsageCache(path).read() is None
+
+    def test_read_missing_keys(self, mod, tmp_path):
+        path = tmp_path / "usage.json"
+        path.write_text(json.dumps({"other": "data"}))
+        assert mod.UsageCache(path).read() is None
+
+    def test_is_fresh_within_ttl(self, mod, tmp_path):
+        path = tmp_path / "usage.json"
+        path.touch()
+        now = path.stat().st_mtime + 10
+        assert mod.UsageCache(path).is_fresh(now)
+
+    def test_is_fresh_beyond_ttl(self, mod, tmp_path):
+        path = tmp_path / "usage.json"
+        path.touch()
+        now = path.stat().st_mtime + mod.USAGE_CACHE_AGE + 1
+        assert not mod.UsageCache(path).is_fresh(now)
+
+    def test_write_is_atomic(self, mod, tmp_path):
+        """Write uses a tmp file, so the cache path is never partially written."""
+        cache = mod.UsageCache(tmp_path / "usage.json")
+        cache.write(self.VALID_DATA)
+        assert not cache.path.with_suffix(".tmp").exists()
+        assert cache.read() == self.VALID_DATA
+
+
 class TestGetUsage:
     """get_usage: caching logic with structured error returns."""
 

@@ -15,7 +15,6 @@ Usage data from Anthropic OAuth API.
 """
 
 import json
-import os
 import logging
 import logging.handlers
 import subprocess
@@ -54,6 +53,50 @@ class FetchError(Exception):
         self.reason = reason
 
 
+class UsageCache:
+    """Manages reading, writing, and freshness checks for the usage cache file."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def exists(self) -> bool:
+        return self.path.exists()
+
+    def touch(self) -> None:
+        """Update mtime to prevent concurrent sessions from re-fetching."""
+        try:
+            self.path.touch(exist_ok=True)
+        except OSError:  # pragma: no cover
+            pass
+
+    def read(self) -> dict | None:
+        """Read and parse the cache file, returning None on failure."""
+        try:
+            data = json.loads(self.path.read_text())
+            if "five_hour" in data and "seven_day" in data:
+                return data
+        except (json.JSONDecodeError, FileNotFoundError, OSError):
+            pass
+        return None
+
+    def write(self, data: dict) -> None:
+        """Atomically write data to the cache file."""
+        try:
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.replace(self.path)
+        except OSError:  # pragma: no cover
+            pass
+
+    def is_fresh(self, now: float) -> bool:
+        """Check if the cache mtime is within the TTL."""
+        try:
+            return (now - self.path.stat().st_mtime) <= USAGE_CACHE_AGE
+        except OSError:  # pragma: no cover
+            return False
+
+
+
 def _default_fetch(
     url: str, headers: dict[str, str], timeout: int
 ) -> bytes:  # pragma: no cover
@@ -72,7 +115,7 @@ class StatusLineContext:
         now: float,
         state_dir: Path,
         config_path: Path,
-        usage_cache: Path,
+        usage_cache: UsageCache,
         debug_log: Path,
         logger: logging.Logger,
         console: Console,
@@ -102,7 +145,7 @@ class StatusLineContext:
             now=time.time(),
             state_dir=state_dir,
             config_path=state_dir / "config.json",
-            usage_cache=state_dir / "usage.json",
+            usage_cache=UsageCache(state_dir / "usage.json"),
             debug_log=state_dir / "debug.log",
             logger=logger,
             console=Console(highlight=False, force_terminal=True),
@@ -136,29 +179,6 @@ class StatusLineContext:
         print(f"statusline: {msg}", file=sys.stderr)
         self.logger.warning(msg)
 
-    def _touch_cache(self) -> None:
-        """Update cache mtime to prevent immediate retry after a failed fetch."""
-        try:
-            self.usage_cache.touch(exist_ok=True)
-        except OSError:  # pragma: no cover
-            pass
-
-    def _read_cache(self) -> dict | None:
-        """Read and parse the cache file."""
-        try:
-            data = json.loads(self.usage_cache.read_text())
-            if "five_hour" in data and "seven_day" in data:
-                return data
-        except (json.JSONDecodeError, FileNotFoundError, OSError):
-            pass
-        return None
-
-    def _cache_is_fresh(self) -> bool:
-        """Check if the cache file exists with an mtime within the TTL."""
-        try:
-            return (self.now - self.usage_cache.stat().st_mtime) <= USAGE_CACHE_AGE
-        except OSError:  # pragma: no cover
-            return False
 
     def init_logging(self) -> None:
         """Attach the rotating file handler to the logger."""
@@ -224,32 +244,23 @@ class StatusLineContext:
         self.logger.debug("fetch_usage: ok (%.3fs)", time.monotonic() - t0)
         return data
 
-    def _write_cache(self, data: dict) -> None:
-        """Atomically write data to the usage cache file."""
-        try:
-            tmp = self.usage_cache.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data))
-            tmp.replace(self.usage_cache)
-        except OSError:  # pragma: no cover
-            pass
 
     def get_usage(self) -> tuple[dict | None, str | None]:
         """Return cached usage data, refreshing if stale."""
-        first_run = not self.usage_cache.exists()
+        cache = self.usage_cache
+        first_run = not cache.exists()
         if first_run:
             self.logger.debug("get_usage: first_run, creating placeholder")
-            self._touch_cache()
+            cache.touch()
 
-        if not first_run and self._cache_is_fresh():
-            cached = self._read_cache()
+        if not first_run and cache.is_fresh(self.now):
+            cached = cache.read()
             return cached, (None if cached else "loading")
 
         # Touch before fetching so concurrent sessions see a fresh mtime
-        # and don't redundantly hit the API.
-        old_mtime = (
-            self.usage_cache.stat().st_mtime if self.usage_cache.exists() else None
-        )
-        self._touch_cache()
+        # and don't redundantly hit the API.  On failure the touched mtime
+        # stays, naturally rate-limiting retries to once per TTL.
+        cache.touch()
 
         try:
             data = self.fetch_usage()
@@ -257,15 +268,12 @@ class StatusLineContext:
             self.logger.debug(
                 "get_usage: fetch failed (%s), falling back to cache", exc.reason
             )
-            # Restore old mtime so the next invocation retries promptly.
-            if old_mtime is not None:
-                os.utime(self.usage_cache, (old_mtime, old_mtime))
-            cached = self._read_cache()
+            cached = cache.read()
             if cached:
                 return cached, exc.reason
             return None, exc.reason
 
-        self._write_cache(data)
+        cache.write(data)
         return data, None
 
     def update_velocity(
