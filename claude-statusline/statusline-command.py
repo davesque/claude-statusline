@@ -17,6 +17,7 @@ Usage data from Anthropic OAuth API.
 import json
 import logging
 import logging.handlers
+import os
 import subprocess
 import sys
 import time
@@ -802,12 +803,14 @@ def get_git_info(work_dir: str | None) -> tuple[str, str] | None:
     if not work_dir:
         return None
     try:
+        env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
         result = subprocess.run(
             ["git", "status", "--porcelain", "--branch"],
             capture_output=True,
             text=True,
             timeout=2,
             cwd=work_dir,
+            env=env,
         )
         if result.returncode != 0:
             return None
