@@ -873,11 +873,17 @@ def get_oauth_token(creds_path: Path | None = None) -> str | None:
     return None
 
 
-def _reset_epoch(resets_at: str) -> float | None:
-    """Parse an ISO timestamp to epoch seconds."""
+def _reset_epoch(resets_at: str | None) -> float | None:
+    """
+    Parse an ISO timestamp to epoch seconds.
+
+    Returns None for a missing or malformed timestamp. The usage payload may
+    carry ``resets_at: null`` for a window that has not started yet, so a
+    non-string value must degrade gracefully rather than raise.
+    """
     try:
         return datetime.fromisoformat(resets_at).timestamp()
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
 

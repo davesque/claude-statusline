@@ -325,6 +325,11 @@ class TestResetEpoch:
     def test_empty_string(self, mod):
         assert mod._reset_epoch("") is None
 
+    def test_none(self, mod):
+        # The usage payload carries resets_at: null for a window that has not
+        # started yet; this must degrade to None rather than raise TypeError.
+        assert mod._reset_epoch(None) is None
+
 
 class TestTimeUntilReset:
     """time_until_reset: human-readable countdown."""
