@@ -31,24 +31,17 @@ def mod():
         sys.modules["statusline_command"] = old  # pragma: no cover
 
 
-def _noop_fetch(url: str, headers: dict[str, str], timeout: int) -> bytes:
-    """Default test fetcher that returns empty JSON."""
-    return b"{}"  # pragma: no cover
-
-
 @pytest.fixture()
 def make_ctx(mod, tmp_path):
     """Factory fixture that builds a test StatusLineContext.
 
     All paths point into tmp_path.  Logger has no handlers (messages
     are silently dropped).  Console writes to an in-memory StringIO.
-    Fetch is a no-op by default.
     """
 
     def _make(
         input_text: str = "{}",
         now: float = 1_000_000.0,
-        fetch=_noop_fetch,
         console: Console | None = None,
         **overrides,
     ):
@@ -59,12 +52,10 @@ def make_ctx(mod, tmp_path):
             "now": now,
             "state_dir": state_dir,
             "config_path": tmp_path / "config.json",
-            "usage_cache": mod.UsageCache(tmp_path / "usage.json"),
             "debug_log": tmp_path / "debug.log",
             "logger": logging.getLogger(f"test-{id(tmp_path)}"),
             "console": console
             or Console(file=StringIO(), highlight=False, force_terminal=True),
-            "fetch": fetch,
         }
         defaults.update(overrides)
         return mod.StatusLineContext(**defaults)

@@ -11,7 +11,8 @@ Bar 1: Context bar (full-width, used/tot)
 Bar 2: 5h usage bar (pacing marker, ⏳reset)
 Bar 3: 7d usage bar (pacing marker, ⏳reset)
 
-Usage data from Anthropic OAuth API.
+Usage data (context window, cost, and 5h/7d rate-limit windows) is supplied
+by the Claude Code harness on stdin.
 """
 
 import json
@@ -21,10 +22,6 @@ import os
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
-from collections.abc import Callable
-from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
@@ -44,69 +41,6 @@ BAR_RED = "color(131)"
 HOT_PINK = "color(199)"
 
 
-class FetchError(Exception):
-    """Raised when usage data cannot be fetched from the API."""
-
-    reason: str
-
-    def __init__(self, reason: str, message: str) -> None:
-        super().__init__(message)
-        self.reason = reason
-
-
-class UsageCache:
-    """Manages reading, writing, and freshness checks for the usage cache file."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-
-    def exists(self) -> bool:
-        return self.path.exists()
-
-    def touch(self) -> None:
-        """Update mtime to prevent concurrent sessions from re-fetching."""
-        try:
-            self.path.touch(exist_ok=True)
-        except OSError:  # pragma: no cover
-            pass
-
-    def read(self) -> dict | None:
-        """Read and parse the cache file, returning None on failure."""
-        try:
-            data = json.loads(self.path.read_text())
-            if "five_hour" in data and "seven_day" in data:
-                return data
-        except (json.JSONDecodeError, FileNotFoundError, OSError):
-            pass
-        return None
-
-    def write(self, data: dict) -> None:
-        """Atomically write data to the cache file."""
-        try:
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data))
-            tmp.replace(self.path)
-        except OSError:  # pragma: no cover
-            pass
-
-    def is_fresh(self, now: float) -> bool:
-        """Check if the cache mtime is within the TTL."""
-        try:
-            return (now - self.path.stat().st_mtime) <= USAGE_CACHE_AGE
-        except OSError:  # pragma: no cover
-            return False
-
-
-
-def _default_fetch(
-    url: str, headers: dict[str, str], timeout: int
-) -> bytes:  # pragma: no cover
-    """Default HTTP fetcher wrapping urllib."""
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
-
-
 class StatusLineContext:
     """Holds all injectable dependencies for the status line."""
 
@@ -116,23 +50,17 @@ class StatusLineContext:
         now: float,
         state_dir: Path,
         config_path: Path,
-        usage_cache: UsageCache,
         debug_log: Path,
         logger: logging.Logger,
         console: Console,
-        fetch: Callable[[str, dict[str, str], int], bytes],
-        creds_path: Path | None = None,
     ) -> None:
         self.input_text = input_text
         self.now = now
         self.state_dir = state_dir
         self.config_path = config_path
-        self.usage_cache = usage_cache
         self.debug_log = debug_log
         self.logger = logger
         self.console = console
-        self.fetch = fetch
-        self.creds_path = creds_path
 
     @classmethod
     def create(cls, input_text: str) -> "StatusLineContext":  # pragma: no cover
@@ -146,11 +74,9 @@ class StatusLineContext:
             now=time.time(),
             state_dir=state_dir,
             config_path=state_dir / "config.json",
-            usage_cache=UsageCache(state_dir / "usage.json"),
             debug_log=state_dir / "debug.log",
             logger=logger,
             console=Console(highlight=False, force_terminal=True),
-            fetch=_default_fetch,
         )
 
     def load_config(self) -> dict:
@@ -175,12 +101,6 @@ class StatusLineContext:
             config["max_width"] = user["max_width"]
         return config
 
-    def _warn(self, msg: str) -> None:
-        """Print a diagnostic message to stderr."""
-        print(f"statusline: {msg}", file=sys.stderr)
-        self.logger.warning(msg)
-
-
     def init_logging(self) -> None:
         """Attach the rotating file handler to the logger."""
         if self.logger.handlers:
@@ -197,78 +117,6 @@ class StatusLineContext:
             self.logger.addHandler(handler)
         except OSError:  # pragma: no cover
             pass
-
-    def fetch_usage(self) -> dict:
-        """Fetch usage data from the Anthropic API.
-
-        Returns parsed usage data on success.
-        Raises FetchError on failure.  Does not manage the cache.
-        """
-        token = get_oauth_token(self.creds_path)
-        if not token:
-            self.logger.debug(
-                "fetch_usage: no OAuth token (file and keychain)"
-            )
-            raise FetchError("no_token", "no OAuth token (file and keychain)")
-
-        t0 = time.monotonic()
-        try:
-            raw = self.fetch(
-                "https://api.anthropic.com/api/oauth/usage",
-                {
-                    "Authorization": f"Bearer {token}",
-                    "anthropic-beta": "oauth-2025-04-20",
-                },
-                3,
-            )
-            data = json.loads(raw)
-        except (
-            urllib.error.URLError,
-            OSError,
-            json.JSONDecodeError,
-            ValueError,
-        ) as exc:
-            self.logger.debug(
-                "fetch_usage: %s: %s (%.3fs)",
-                type(exc).__name__,
-                exc,
-                time.monotonic() - t0,
-            )
-            raise FetchError("api_err", str(exc)) from exc
-
-        if "five_hour" not in data or "seven_day" not in data:
-            self._warn("usage API response missing expected keys")
-            self.logger.debug("fetch_usage: bad response, keys=%s", list(data.keys()))
-            raise FetchError("bad_response", "missing expected keys")
-
-        self.logger.debug("fetch_usage: ok (%.3fs)", time.monotonic() - t0)
-        return data
-
-
-    def get_usage(self) -> tuple[dict | None, str | None]:
-        """Return cached usage data, refreshing if stale."""
-        cache = self.usage_cache
-        if cache.exists() and cache.is_fresh(self.now):
-            cached = cache.read()
-            return cached, (None if cached else "loading")
-
-        if not cache.exists():
-            self.logger.debug("get_usage: first_run, creating placeholder")
-
-        # Touch before fetching so concurrent sessions see a fresh mtime
-        # and don't redundantly hit the API.  On failure the touched mtime
-        # stays, naturally rate-limiting retries to once per TTL.
-        cache.touch()
-        try:
-            data = self.fetch_usage()
-        except FetchError as exc:
-            self.logger.debug(
-                "get_usage: fetch failed (%s), falling back to cache", exc.reason
-            )
-            return cache.read(), exc.reason
-
-        cache.write(data)
-        return data, None
 
     def update_velocity(
         self, session_id: str, total_tokens: int, total_cost: float
@@ -382,8 +230,8 @@ class StatusLineContext:
             session_id, total_tokens, cost_usd or 0.0
         )
 
-        # --- Usage quota ---
-        usage, usage_reason = self.get_usage()
+        # --- Usage quota (5h / 7d rate-limit windows, supplied by the harness) ---
+        rate_limits = data.get("rate_limits") or {}
 
         # === Build layout ===
 
@@ -439,11 +287,6 @@ class StatusLineContext:
                 fig_burn.append("--", style=DIM)
                 fig_burn.append("/hr", style=DIM)
 
-        fig_warning = Text()
-        if usage_reason == "no_token":
-            fig_warning.append("⚠️ ")
-            fig_warning.append("no token", style="yellow")
-
         # --- Flow layout for metrics figures ---
         sep = Text(" │ ", style=DIM_GRAY)
         sep_len = sep.cell_len
@@ -458,7 +301,6 @@ class StatusLineContext:
             "burn": fig_burn,
             "last": fig_last,
             "avg": fig_avg,
-            "warning": fig_warning,
         }
         figures: list[Text] = [
             fig_map[key]
@@ -487,10 +329,10 @@ class StatusLineContext:
         usage_5h_pct: float | None = None
         usage_5h_suffix = Text()
         usage_5h_target: float | None = None
-        if usage and "five_hour" in usage:
-            fh = usage["five_hour"]
-            usage_5h_pct = fh.get("utilization", 0)
-            resets_5h = fh.get("resets_at", "")
+        fh = rate_limits.get("five_hour")
+        if fh:
+            usage_5h_pct = fh.get("used_percentage", 0)
+            resets_5h = fh.get("resets_at")
             usage_5h_target = pacing_target(resets_5h, 5 * 3600, self.now)
             usage_5h_ttl = time_until_reset(resets_5h, self.now)
             usage_5h_suffix = Text()
@@ -505,10 +347,10 @@ class StatusLineContext:
         usage_7d_pct: float | None = None
         usage_7d_suffix = Text()
         usage_7d_target: float | None = None
-        if usage and "seven_day" in usage:
-            sd = usage["seven_day"]
-            usage_7d_pct = sd.get("utilization", 0)
-            resets_7d = sd.get("resets_at", "")
+        sd = rate_limits.get("seven_day")
+        if sd:
+            usage_7d_pct = sd.get("used_percentage", 0)
+            resets_7d = sd.get("resets_at")
             usage_7d_target = pacing_target(resets_7d, 7 * 24 * 3600, self.now)
             usage_7d_ttl = time_until_reset(resets_7d, self.now)
             usage_7d_suffix = Text()
@@ -519,14 +361,9 @@ class StatusLineContext:
                 usage_7d_suffix.append(" ⏳ ", style=DIM)
                 usage_7d_suffix.append(usage_7d_ttl)
 
-        # --- Usage bar labels (shown when no data) ---
-        usage_labels: dict[str | None, str] = {
-            "no_token": "no token",
-            "api_err": "api error",
-            "bad_response": "bad response",
-            "loading": "loading\u2026",
-        }
-        usage_bar_label = usage_labels.get(usage_reason, "no data")
+        # Shown in place of a bar before the harness reports rate limits
+        # (early in a session, or for accounts without rolling-window limits).
+        usage_bar_label = "no data"
 
         suffix_width = max(
             ctx_suffix.cell_len, usage_5h_suffix.cell_len, usage_7d_suffix.cell_len
@@ -612,12 +449,7 @@ class StatusLineContext:
         for line in metrics_lines:
             self.console.print(line)
         self.console.print(divider)
-        if fig_warning.cell_len > 0:
-            self.console.print(bars_table)
-            self.console.print(divider)
-            self.console.print(fig_warning, end="")
-        else:
-            self.console.print(bars_table, end="")
+        self.console.print(bars_table, end="")
 
 
 DEFAULT_FIGURES = ["model", "cwd", "git", "duration", "total", "burn", "last", "avg"]
@@ -824,89 +656,37 @@ def get_git_info(work_dir: str | None) -> tuple[str, str] | None:
 # ---------------------------------------------------------------------------
 
 EMA_ALPHA = 2 / 9  # N=8 turns
-USAGE_CACHE_AGE = 300  # seconds
 
 
-def _read_keychain_credentials() -> str | None:
-    """Read OAuth token from macOS Keychain (fallback when no credentials file).
-
-    Returns the access token string, or *None* on any failure.
+def time_until_reset(resets_at: float | None, now: float) -> str | None:
     """
-    if sys.platform != "darwin":
-        return None
-    try:
-        raw = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-s",
-                "Claude Code-credentials",
-                "-w",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if raw.returncode != 0:
-            return None
-        creds = json.loads(raw.stdout)
-        return creds.get("claudeAiOauth", {}).get("accessToken")
-    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+    Return a human-readable countdown like '2h13m' or '3d5h' until reset.
+
+    Accepts an epoch-seconds timestamp as delivered in the harness
+    ``rate_limits`` payload, returning None when it is missing or already past.
+    """
+    if resets_at is None:
         return None
 
-
-def get_oauth_token(creds_path: Path | None = None) -> str | None:
-    """Read OAuth access token from credentials file or macOS Keychain.
-
-    Tries *creds_path* (or ``~/.claude/.credentials.json``) first.
-    Falls back to the macOS Keychain on Darwin when the file is missing.
-    """
-    creds_file = creds_path or Path.home() / ".claude" / ".credentials.json"
-    try:
-        creds = json.loads(creds_file.read_text())
-        return creds.get("claudeAiOauth", {}).get("accessToken")
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
-    # File not found / unreadable — try macOS Keychain
-    if creds_path is None:
-        return _read_keychain_credentials()
-    return None
-
-
-def _reset_epoch(resets_at: str | None) -> float | None:
-    """
-    Parse an ISO timestamp to epoch seconds.
-
-    Returns None for a missing or malformed timestamp. The usage payload may
-    carry ``resets_at: null`` for a window that has not started yet, so a
-    non-string value must degrade gracefully rather than raise.
-    """
-    try:
-        return datetime.fromisoformat(resets_at).timestamp()
-    except (ValueError, TypeError):
-        return None
-
-
-def time_until_reset(resets_at: str, now: float) -> str | None:
-    """Return a human-readable string like '2h13m' or '3d5h' until reset."""
-    epoch = _reset_epoch(resets_at)
-    if epoch is None:
-        return None
-
-    remaining = int(epoch - now)
+    remaining = int(resets_at - now)
     if remaining <= 0:
         return None
 
     return format_time_delta(remaining)
 
 
-def pacing_target(resets_at: str, window_secs: int, now: float) -> float | None:
-    """Compute what percentage of the window has elapsed (0-100)."""
-    epoch = _reset_epoch(resets_at)
-    if epoch is None:
+def pacing_target(
+    resets_at: float | None, window_secs: int, now: float
+) -> float | None:
+    """
+    Compute what percentage of the window has elapsed (0-100).
+
+    Accepts an epoch-seconds reset timestamp, returning None when it is missing.
+    """
+    if resets_at is None:
         return None
 
-    start_epoch = epoch - window_secs
+    start_epoch = resets_at - window_secs
     elapsed = max(0, min(now - start_epoch, window_secs))
     return elapsed / window_secs * 100
 

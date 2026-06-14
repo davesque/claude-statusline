@@ -64,25 +64,16 @@ class TestMainEndToEnd:
         output = _output(make_ctx(input_text=json.dumps(minimal)))
         assert len(output) > 0
 
-    def test_with_usage_data(self, make_ctx, tmp_path):
-        cache = tmp_path / "usage.json"
-        usage = {
-            "five_hour": {
-                "utilization": 30,
-                "resets_at": "2099-01-15T05:00:00+00:00",
-            },
-            "seven_day": {
-                "utilization": 55,
-                "resets_at": "2099-01-20T00:00:00+00:00",
+    def test_with_usage_data(self, make_ctx):
+        now = 1_000_000.0
+        data = {
+            **SAMPLE_INPUT,
+            "rate_limits": {
+                "five_hour": {"used_percentage": 30, "resets_at": int(now) + 3 * 3600},
+                "seven_day": {"used_percentage": 55, "resets_at": int(now) + 4 * 86400},
             },
         }
-        cache.write_text(json.dumps(usage))
-
-        ctx = make_ctx(
-            input_text=json.dumps(SAMPLE_INPUT),
-            now=cache.stat().st_mtime + 5,
-        )
-        output = _output(ctx)
+        output = _output(make_ctx(input_text=json.dumps(data), now=now))
         assert "5h" in output
         assert "30%" in output
         assert "7d" in output
@@ -144,62 +135,24 @@ class TestMainEndToEnd:
         assert "🌿" in output
         assert "✓" in output
 
-    def test_usage_reset_timers(self, make_ctx, tmp_path):
-        cache = tmp_path / "usage.json"
-        usage = {
-            "five_hour": {
-                "utilization": 30,
-                "resets_at": "2099-01-15T05:00:00+00:00",
-            },
-            "seven_day": {
-                "utilization": 55,
-                "resets_at": "2099-01-20T00:00:00+00:00",
+    def test_usage_reset_timers(self, make_ctx):
+        now = 1_000_000.0
+        data = {
+            **SAMPLE_INPUT,
+            "rate_limits": {
+                "five_hour": {"used_percentage": 30, "resets_at": int(now) + 3 * 3600},
+                "seven_day": {"used_percentage": 55, "resets_at": int(now) + 4 * 86400},
             },
         }
-        cache.write_text(json.dumps(usage))
-
-        output = _output(
-            make_ctx(
-                input_text=json.dumps(SAMPLE_INPUT),
-                now=cache.stat().st_mtime + 5,
-            )
-        )
+        output = _output(make_ctx(input_text=json.dumps(data), now=now))
         assert "⏳" in output
 
-    def test_no_token_shows_warning(self, make_ctx, tmp_path):
-        """When there's no OAuth token, warning figure appears."""
-        cfg = tmp_path / "config.json"
-        figures = [
-            "model",
-            "cwd",
-            "git",
-            "duration",
-            "total",
-            "burn",
-            "last",
-            "avg",
-            "warning",
-        ]
-        cfg.write_text(json.dumps({"figures": figures}))
-
-        output = _output(
-            make_ctx(
-                input_text=json.dumps(SAMPLE_INPUT),
-                creds_path=tmp_path / "nonexistent.json",
-            )
-        )
-        assert "⚠️" in output
-        assert "no token" in output
-
-    def test_no_token_usage_bar_label(self, make_ctx, tmp_path):
-        """When there's no OAuth token, usage bars show 'no token' label."""
-        output = _output(
-            make_ctx(
-                input_text=json.dumps(SAMPLE_INPUT),
-                creds_path=tmp_path / "nonexistent.json",
-            )
-        )
-        assert "no token" in output
+    def test_no_usage_data_shows_label(self, make_ctx):
+        """With no rate_limits on stdin, usage bars show the 'no data' label."""
+        # SAMPLE_INPUT carries no rate_limits, as on a fresh session before the
+        # first API response.
+        output = _output(make_ctx(input_text=json.dumps(SAMPLE_INPUT)))
+        assert "no data" in output
 
 
 class TestInitLogging:
