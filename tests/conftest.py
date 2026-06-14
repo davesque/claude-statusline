@@ -20,6 +20,7 @@ _SCRIPT = (
 def mod():
     """Import statusline-command.py as a module."""
     spec = importlib.util.spec_from_file_location("statusline_command", _SCRIPT)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     old = sys.modules.get("statusline_command")
     sys.modules["statusline_command"] = module
