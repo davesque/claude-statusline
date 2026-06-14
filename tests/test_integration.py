@@ -268,6 +268,39 @@ class TestConfigIntegration:
         assert dur_pos < model_pos
 
 
+def _divider_width(output: str) -> int:
+    """Plain (ANSI-stripped) length of the rendered divider line."""
+    import re
+
+    for line in output.splitlines():
+        if "──" in line:
+            return len(re.sub(r"\x1b\[[0-9;]*m", "", line))
+    raise AssertionError("no divider line in output")  # pragma: no cover
+
+
+class TestResponsiveWidth:
+    """Width tracks the injected COLUMNS value, clamped to [MIN_WIDTH, MAX_WIDTH]."""
+
+    def test_wide_terminal_capped_at_max(self, mod, make_ctx):
+        output = _output(make_ctx(input_text=json.dumps(SAMPLE_INPUT), columns=200))
+        assert _divider_width(output) == mod.MAX_WIDTH
+
+    def test_narrow_terminal_floored_at_min(self, mod, make_ctx):
+        output = _output(make_ctx(input_text=json.dumps(SAMPLE_INPUT), columns=40))
+        assert _divider_width(output) == mod.MIN_WIDTH
+
+    def test_in_band_tracks_terminal_width(self, mod, make_ctx):
+        width = 80
+        output = _output(make_ctx(input_text=json.dumps(SAMPLE_INPUT), columns=width))
+        assert _divider_width(output) == width
+
+    def test_explicit_max_width_wins_over_columns(self, mod, make_ctx, tmp_path):
+        cfg = tmp_path / "config.json"
+        cfg.write_text(json.dumps({"max_width": 120}))
+        output = _output(make_ctx(input_text=json.dumps(SAMPLE_INPUT), columns=80))
+        assert _divider_width(output) >= 120
+
+
 class TestShortenBranch:
     """shorten_branch: prefix-aware branch name truncation."""
 

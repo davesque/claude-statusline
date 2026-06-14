@@ -53,6 +53,7 @@ class StatusLineContext:
         debug_log: Path,
         logger: logging.Logger,
         console: Console,
+        columns: int | None = None,
     ) -> None:
         self.input_text = input_text
         self.now = now
@@ -61,6 +62,7 @@ class StatusLineContext:
         self.debug_log = debug_log
         self.logger = logger
         self.console = console
+        self.columns = columns
 
     @classmethod
     def create(cls, input_text: str) -> "StatusLineContext":  # pragma: no cover
@@ -69,6 +71,12 @@ class StatusLineContext:
         state_dir.mkdir(parents=True, exist_ok=True)
         logger = logging.getLogger("statusline")
         logger.setLevel(logging.DEBUG)
+        # Claude Code (>= 2.1.153) sets COLUMNS to the terminal width before
+        # running the status line; absent or unparseable means no width hint.
+        try:
+            columns = int(os.environ["COLUMNS"])
+        except (KeyError, ValueError):
+            columns = None
         return cls(
             input_text=input_text,
             now=time.time(),
@@ -77,6 +85,7 @@ class StatusLineContext:
             debug_log=state_dir / "debug.log",
             logger=logger,
             console=Console(highlight=False, force_terminal=True),
+            columns=columns,
         )
 
     def load_config(self) -> dict:
@@ -368,31 +377,25 @@ class StatusLineContext:
         suffix_width = max(
             ctx_suffix.cell_len, usage_5h_suffix.cell_len, usage_7d_suffix.cell_len
         )
-        # Layout: "label bar suffix"
+        # Layout: "label bar suffix"; the bar fills whatever width is left.
         min_bar_width = config["min_bar_width"]
-        max_bar_nudge = 20  # max extra chars we'll add to bars for better flow
-
-        # Find smallest bar width that minimises line count
         bar_fixed = label_width + 1 + 1 + suffix_width
-        base_width = bar_fixed + min_bar_width
-        best_lines = count_flow_lines(figures, base_width, sep_len)
-        bar_width = min_bar_width
-        for nudge in range(1, max_bar_nudge + 1):
-            candidate = base_width + nudge
-            n = count_flow_lines(figures, candidate, sep_len)
-            if n < best_lines:
-                bar_width = min_bar_width + nudge
-                best_lines = n
-                break  # take the first improvement
-        bar_content_width = bar_fixed + bar_width
 
-        # Apply max_width override: expand bar to fill, or cap at max
         if config["max_width"] is not None:
-            target_width = max(config["max_width"], bar_content_width)
-            extra = target_width - bar_content_width
+            # Explicit width override: expand the bar to fill, never shrinking
+            # below the wrap-minimising baseline.
+            bar_width = auto_bar_width(figures, bar_fixed, min_bar_width, sep_len)
+            extra = config["max_width"] - (bar_fixed + bar_width)
             if extra > 0:
                 bar_width += extra
-                bar_content_width = target_width
+        elif self.columns is not None:
+            # Responsive: track the terminal width within [MIN_WIDTH, MAX_WIDTH].
+            target = max(MIN_WIDTH, min(MAX_WIDTH, self.columns))
+            bar_width = max(min_bar_width, target - bar_fixed)
+        else:
+            # No width hint (e.g. run outside the harness): minimise wrapping.
+            bar_width = auto_bar_width(figures, bar_fixed, min_bar_width, sep_len)
+        bar_content_width = bar_fixed + bar_width
 
         def make_bar_row(
             label: str,
@@ -454,6 +457,12 @@ class StatusLineContext:
 
 DEFAULT_FIGURES = ["model", "cwd", "git", "duration", "total", "burn", "last", "avg"]
 DEFAULT_MIN_BAR_WIDTH = 30
+
+# Bounds for terminal-responsive rendering. When the harness reports the
+# terminal width (COLUMNS), the status line tracks it between these, rendering
+# no narrower than MIN_WIDTH and ignoring terminal space beyond MAX_WIDTH.
+MIN_WIDTH = 56
+MAX_WIDTH = 100
 
 
 def pct_style(pct: float, green: int = 50, yellow: int = 80) -> str:
@@ -736,6 +745,25 @@ def count_flow_lines(figs: list[Text], max_width: int, sep_len: int) -> int:
             lines += 1
             line_len = fig_len
     return lines
+
+
+def auto_bar_width(
+    figs: list[Text], bar_fixed: int, min_bar_width: int, sep_len: int
+) -> int:
+    """
+    Pick a bar width that minimises metric-figure wrapping.
+
+    Returns the smallest width at or above *min_bar_width* (capped at
+    *min_bar_width* + 20) that reduces the number of wrapped figure lines,
+    used when the harness gives no terminal width to render responsively to.
+    """
+    max_bar_nudge = 20  # most extra chars we'll add to improve flow
+    base_width = bar_fixed + min_bar_width
+    best_lines = count_flow_lines(figs, base_width, sep_len)
+    for nudge in range(1, max_bar_nudge + 1):
+        if count_flow_lines(figs, base_width + nudge, sep_len) < best_lines:
+            return min_bar_width + nudge
+    return min_bar_width
 
 
 # ---------------------------------------------------------------------------
