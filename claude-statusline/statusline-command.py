@@ -461,8 +461,9 @@ DEFAULT_MIN_BAR_WIDTH = 30
 # Bounds for terminal-responsive rendering. When the harness reports the
 # terminal width (COLUMNS), the status line tracks it between these, rendering
 # no narrower than MIN_WIDTH and ignoring terminal space beyond MAX_WIDTH.
-MIN_WIDTH = 56
-MAX_WIDTH = 100
+# MIN_WIDTH ~ the intrinsic floor: bar label + DEFAULT_MIN_BAR_WIDTH + suffix.
+MIN_WIDTH = 51
+MAX_WIDTH = 70
 
 
 def pct_style(pct: float, green: int = 50, yellow: int = 80) -> str:

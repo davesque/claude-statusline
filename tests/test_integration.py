@@ -290,7 +290,7 @@ class TestResponsiveWidth:
         assert _divider_width(output) == mod.MIN_WIDTH
 
     def test_in_band_tracks_terminal_width(self, mod, make_ctx):
-        width = 80
+        width = 64
         output = _output(make_ctx(input_text=json.dumps(SAMPLE_INPUT), columns=width))
         assert _divider_width(output) == width
 
