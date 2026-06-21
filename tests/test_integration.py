@@ -38,6 +38,21 @@ class TestMainEndToEnd:
         output = _output(make_ctx(input_text=json.dumps(SAMPLE_INPUT)))
         assert "Opus 4.6" in output
 
+    def test_model_name_strips_context_word(self, make_ctx):
+        data = {**SAMPLE_INPUT, "model": {"display_name": "Opus 4.8 (1M context)"}}
+        output = _output(make_ctx(input_text=json.dumps(data)))
+        assert "Opus 4.8 (1M)" in output
+        assert "context" not in output.lower()
+
+    def test_effort_suffix_appended(self, make_ctx):
+        data = {**SAMPLE_INPUT, "effort": {"level": "high"}}
+        output = _output(make_ctx(input_text=json.dumps(data)))
+        assert "Opus 4.6 [high]" in output
+
+    def test_no_effort_suffix_when_absent(self, make_ctx):
+        output = _output(make_ctx(input_text=json.dumps(SAMPLE_INPUT)))
+        assert "Opus 4.6 [" not in output
+
     def test_duration_in_output(self, make_ctx):
         output = _output(make_ctx(input_text=json.dumps(SAMPLE_INPUT)))
         assert "5m12s" in output

@@ -19,6 +19,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import subprocess
 import sys
 import time
@@ -212,6 +213,12 @@ class StatusLineContext:
 
         # --- Extract fields ---
         model = (data.get("model") or {}).get("display_name", "Unknown")
+        # Drop the word "context" (e.g. "Opus 4.8 (1M context)" -> "Opus 4.8 (1M)").
+        model = re.sub(r"\s+\bcontext\b", "", model)
+        # Annotate the model with the live reasoning effort, when it applies.
+        effort_level = (data.get("effort") or {}).get("level")
+        if effort_level:
+            model = f"{model} [{effort_level}]"
         session_id = data.get("session_id", "unknown")
 
         cw = data.get("context_window") or {}
